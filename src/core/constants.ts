@@ -3,8 +3,8 @@
  *
  * `@types/titanium` cannot answer this. Its generator drops the `constants` field the SDK apidoc
  * carries on each property, so `textAlign` is `string | number` and `TEXT_ALIGNMENT_CENTER` is
- * `number | string`, with nothing joining them (ewanharris/tracker#11). The pairing below is that
- * field, copied by hand from `tidev/titanium-sdk` for the properties a stylesheet commonly sets.
+ * `number | string`, with nothing joining them. The pairing below is that field, copied by hand
+ * from `tidev/titanium-sdk` for the properties a stylesheet commonly sets.
  *
  * It says which *family* of constants a property takes and nothing about which exist: a wildcard
  * is expanded against the project's own types, so a project on an older SDK is never offered a

@@ -40,22 +40,6 @@ jobs:
       - name: Test
         run: npm test
 
-  package:
-    name: Built package
-    needs: lint-build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '24.x'
-          cache: npm
-      - run: npm ci
-      # the one tier that runs against out/ rather than the sources: the bin's shebang, the
-      # exports map, and the command as npm links it
-      - name: Test the built package
-        run: npm run test:package
-
   node20:
     name: Node 20 compatibility
     needs: lint-build

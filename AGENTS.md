@@ -87,7 +87,7 @@ for anything else.
 
 A CommonJS extension host cannot always `import` this package — `require(esm)` needs Node 20.19 or
 22.12, and VS Code has shipped older. It does not need to: `require.resolve` does not run the
-module, so `require.resolve('titanium-language-server/server')` gets the same path as `serverPath`
+module, so `require.resolve('@titanium-sdk/language-server/server')` gets the same path as `serverPath`
 on any Node.
 
 There is **one server artifact, not two**. `bin` points straight at `out/server.js`, which carries
@@ -162,8 +162,14 @@ working, unchecked by tsc and ESLint, and it broke twice while it existed.
 - `npm run watch` — rebuild on change
 - `npm run lint` — ESLint over `src/`
 - `npm test` — the suite, from source, under coverage; fails below the coverage floor. No build first
-- `npm run test:package` — builds, then the tests that run against `out/`
 - `npm run test:e2e` — the tests that reach the npm registry; needs network
+
+## Releasing
+
+Published to npm as `@titanium-sdk/language-server`; the command it installs is still
+`titanium-language-server`. A release is a pull request that bumps `version`, then a GitHub Release
+tagged `v<version>` from the merge: `publish.yml` checks the tag matches, runs lint and tests,
+ and publishes through npm's trusted publishing, with provenance and no stored token.
 
 ## Testing
 
@@ -187,10 +193,6 @@ working, unchecked by tsc and ESLint, and it broke twice while it existed.
   towards the floor rather than needing an ignore pragma — they spawn `src/server.ts`, so it is one
   file set and one number. It only reports files something loaded, though: a module no test and no
   source file imports is invisible to the gate, which is currently true of `index.ts`.
-- **`src/test/package/` is the one tier that runs against `out/`**, and `npm test` does not include
-  it. What it asserts is only true of the built artifact — the bin's shebang, the exports map, the
-  path `serverPath` names, the command as npm links it — so it builds first and has its own CI job.
-  Nothing about behaviour belongs there; that is covered from source.
 - **`src/test/e2e/` is the one tier that reaches the network**, and `npm test` does not include it.
   It drives a spawned server through fetching the real `@types/titanium` from the registry, for
   both project types, into a temporary cache, then starts a second server offline against that

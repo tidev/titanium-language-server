@@ -6,7 +6,7 @@ completion, hover and go to definition in any editor that speaks the
 mistakes in Alloy views and stylesheets, and offers code actions in an editor that supports code
 action literals, as current editors do.
 
-> **Status: in development, not yet published.** [Phase 1](https://github.com/ewanharris/titanium-language-server/issues/3)
+> **Status: in development, not yet published.** [Phase 1](https://github.com/tidev/titanium-language-server/issues/3)
 > tracks replacing the language features in vscode-titanium, which will bundle the server.
 
 ## Why
@@ -124,7 +124,6 @@ npm install
 npm run build          # or: npm run watch
 npm run lint
 npm test               # from source, under coverage
-npm run test:package   # builds, then checks the published artifact
 npm run test:e2e       # reaches the npm registry
 ```
 

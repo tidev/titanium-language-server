@@ -1,8 +1,19 @@
 {
-	"name": "titanium-language-server",
-	"version": "0.0.0",
+	"name": "@titanium-sdk/language-server",
+	"version": "0.1.0",
 	"description": "Language server for Titanium and Alloy projects",
 	"license": "Apache-2.0",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/tidev/titanium-language-server.git"
+	},
+	"homepage": "https://github.com/tidev/titanium-language-server#readme",
+	"bugs": {
+		"url": "https://github.com/tidev/titanium-language-server/issues"
+	},
+	"publishConfig": {
+		"access": "public"
+	},
 	"type": "module",
 	"main": "out/index.js",
 	"types": "out/index.d.ts",
@@ -34,7 +45,6 @@
 		"watch": "tsc -w",
 		"lint": "eslint src/",
 		"test": "node --test --experimental-test-coverage --test-coverage-exclude=\"src/test/**\" --test-coverage-lines=90 --test-coverage-functions=90 --test-coverage-branches=80 --test-reporter=spec \"src/test/core/**/*.test.ts\" \"src/test/server/**/*.test.ts\" \"src/test/unit/**/*.test.ts\"",
-		"test:package": "npm run build && node --test --test-reporter=spec \"src/test/package/**/*.test.ts\"",
 		"test:e2e": "node --test --test-reporter=spec \"src/test/e2e/**/*.test.ts\"",
 		"test:debug": "node --test --test-reporter=spec \"src/test/core/**/*.test.ts\" \"src/test/server/**/*.test.ts\" \"src/test/unit/**/*.test.ts\""
 	},

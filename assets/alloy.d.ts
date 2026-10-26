@@ -17,7 +17,7 @@
  * tsconfig include pattern would pull these ambient declarations into this project's own
  * compilation, so `Alloy` would be a global in our source. And `tsc` does not copy a `.d.ts` it
  * was given as input into `outDir`, so a file under `src/` would be missing from the build
- * entirely. A test in `src/test/package/` asserts it is where the built package says it is.
+ * entirely.
  *
  * Types are named where the referent is knowable and left `unknown` where it is not. A view member
  * really can be either a Titanium proxy or a controller — `<Require>` and `<Widget>` both put a

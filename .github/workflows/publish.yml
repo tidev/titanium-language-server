@@ -1,0 +1,38 @@
+name: Publish
+on:
+  release:
+    types: [ published ]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+          registry-url: 'https://registry.npmjs.org'
+      # trusted publishing needs npm 11.5.1 or newer, whatever the runner's Node bundles
+      - run: npm install --global npm@^11.5.1
+      - run: npm ci
+
+      - name: Check the tag matches the version
+        run: |
+          version="v$(node -p "require('./package.json').version")"
+          if [ "$version" != "$GITHUB_REF_NAME" ]; then
+            echo "The release is tagged $GITHUB_REF_NAME, but package.json is at $version" >&2
+            exit 1
+          fi
+
+      - name: Lint
+        run: npm run lint
+      - name: Test
+        run: npm test
+
+      - name: Publish
+        run: npm publish

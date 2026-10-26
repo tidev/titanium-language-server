@@ -6,7 +6,7 @@ import { TiLanguageService } from './server/service.ts';
  * The server's entry point, and the module an editor extension resolves.
  *
  * There is one artifact and not two: `bin` points here, `serverPath` resolves here, and
- * `require.resolve('titanium-language-server/server')` finds the same file. The adapter itself is
+ * `require.resolve('@titanium-sdk/language-server/server')` finds the same file. The adapter itself is
  * in server/, so this file is the shebang, the export and the decision to start.
  */
 export { TiLanguageService } from './server/service.ts';
