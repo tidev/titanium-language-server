@@ -167,9 +167,15 @@ working, unchecked by tsc and ESLint, and it broke twice while it existed.
 ## Releasing
 
 Published to npm as `@titanium-sdk/language-server`; the command it installs is still
-`titanium-language-server`. A release is a pull request that bumps `version`, then a GitHub Release
-tagged `v<version>` from the merge: `publish.yml` checks the tag matches, runs lint and tests,
- and publishes through npm's trusted publishing, with provenance and no stored token.
+`titanium-language-server`. A release is a pull request that bumps `version` and renames
+`CHANGELOG.md`'s `## Unreleased` heading to `## <version> - <date>`, with a new, empty
+`## Unreleased` above it. Then a GitHub Release tagged `v<version>` from the merge, with that
+section as its notes: `publish.yml` checks the tag matches and the changelog has the version's
+heading, runs lint and tests, and publishes through npm's trusted publishing, with provenance and
+no stored token.
+
+The changelog is kept up as changes land, so a release never has to dig through history for it —
+see below.
 
 ## Testing
 
@@ -355,6 +361,11 @@ the commit body rather than the subject.
 Every pull request body **closes its issues with GitHub's keyword syntax** — `Closes #9`, one per
 issue — so merging shuts them automatically. `Refs #9` only links, and leaves someone to close it by
 hand later; use it only for an issue the pull request genuinely does not finish.
+
+A pull request that changes something a user would notice — a `feat`, a `fix`, a `perf`, a change
+to what the package needs to run — **adds a line under `## Unreleased` in `CHANGELOG.md`**, under
+the subheading for the area it touches, ending with its own number: `(#70)`. Write it for someone
+using the server, not someone reading the code. Tests, CI, refactors and docs need no line.
 
 Work on a branch and open a pull request. Nothing is pushed to `main` directly. Where several
 changes are in flight, stack the branches.
