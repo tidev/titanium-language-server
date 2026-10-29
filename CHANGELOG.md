@@ -10,10 +10,10 @@ renames that heading to its version and date, and starts a new, empty one above 
 
 ### Controllers and JavaScript
 
-- `$.` offers the view's ids first, ahead of the members every controller has (#PR)
-- Completions follow TypeScript's own ordering: locals before globals, deprecated members last (#PR)
-- Mark deprecated completions, for an editor that can show them struck through (#PR)
-- Stop offering members a type removes, such as `add` on a `Label` (#PR)
+- `$.` offers the view's ids first, ahead of the members every controller has (#83)
+- Completions follow TypeScript's own ordering: locals before globals, deprecated members last (#83)
+- Mark deprecated completions, for an editor that can show them struck through (#83)
+- Stop offering members a type removes, such as `add` on a `Label` (#83)
 
 ## 0.1.0 - 2026-10-28
 
