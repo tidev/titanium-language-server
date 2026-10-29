@@ -622,10 +622,16 @@ export class TiLanguageService {
 			const items = script.service.completionsAt(script.path, offset).map(entry => {
 				// no insert forms: TypeScript's entries are names, and the client inserting the
 				// label is exactly right for every one of them
-				const item = toCompletionItem({ label: entry.name }, this.capabilities.snippets);
+				const item = toCompletionItem({ label: entry.name, sortText: entry.sortText }, this.capabilities.snippets);
 
 				item.kind = toCompletionKind(entry.kind, this.capabilities.completionItemKinds);
 				item.data = { uri: params.textDocument.uri, offset };
+
+				if (entry.deprecated && this.capabilities.completionDeprecation === 'tag') {
+					item.tags = [ vls.CompletionItemTag.Deprecated ];
+				} else if (entry.deprecated && this.capabilities.completionDeprecation === 'property') {
+					item.deprecated = true;
+				}
 
 				return item;
 			});

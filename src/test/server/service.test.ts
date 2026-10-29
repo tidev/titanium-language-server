@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { CompletionItemKind, DiagnosticSeverity, TextEdit } from 'vscode-languageserver';
-import type { ClientCapabilities, CodeAction } from 'vscode-languageserver';
+import { CompletionItemKind, CompletionItemTag, DiagnosticSeverity, TextEdit } from 'vscode-languageserver';
+import type { ClientCapabilities, ClientCompletionItemOptions, CodeAction, CompletionItem } from 'vscode-languageserver';
 import { URI } from 'vscode-uri';
 import { TiLanguageService } from '../../server/service.ts';
 import { Project } from '../../core/project.ts';
@@ -901,6 +901,44 @@ describe('The language service adapter', () => {
 			const items = await connection.completion(uri, 0, '$.'.length);
 
 			assert.ok(items?.some(item => item.label === 'label'), 'expected the view id to reach $');
+		});
+
+		it('should mark a deprecated entry the way the client asked for', async () => {
+			const cases: [ ClientCompletionItemOptions, Pick<CompletionItem, 'tags'|'deprecated'> ][] = [
+				[ { tagSupport: { valueSet: [ CompletionItemTag.Deprecated ] } }, { tags: [ CompletionItemTag.Deprecated ], deprecated: undefined } ],
+				[ { deprecatedSupport: true }, { tags: undefined, deprecated: true } ],
+				[ {}, { tags: undefined, deprecated: undefined } ]
+			];
+
+			for (const [ completionItem, expected ] of cases) {
+				const projectRoot = await serverOn('classic-project', { textDocument: { completion: { completionItem } } });
+				const uri = uriIn(projectRoot, 'Resources', 'scratch.js');
+				connection.open(uri, 'javascript', 'Ti.UI.');
+
+				const items = await connection.completion(uri, 0, 'Ti.UI.'.length) ?? [];
+				const deprecated = items.find(item => item.label === 'ATTRIBUTE_LINE_BREAK');
+				const current = items.find(item => item.label === 'SIZE');
+
+				assert.deepEqual({ tags: deprecated?.tags, deprecated: deprecated?.deprecated }, expected, JSON.stringify(completionItem));
+				assert.deepEqual({ tags: current?.tags, deprecated: current?.deprecated }, { tags: undefined, deprecated: undefined });
+			}
+		});
+
+		it('should send the ids on $ with a sort text that puts them first', async () => {
+			// with no sort text a client sorts by label, and the ids land among Alloy.Controller's
+			// members — the twenty or so names every controller has, and the ones a user wants least
+			const projectRoot = await serverOn('alloy-project');
+			const uri = uriIn(projectRoot, 'app', 'controllers', 'index.js');
+			connection.open(uri, 'javascript', '$.');
+
+			const items = await connection.completion(uri, 0, '$.'.length) ?? [];
+			const rank = items.find(item => item.label === 'label')?.sortText;
+
+			assert.ok(rank, 'expected the id to carry a sort text');
+			assert.ok(
+				items.every(item => [ 'label', 'index' ].includes(item.label) || rank < (item.sortText ?? item.label)),
+				'expected every other member to sort after the ids'
+			);
 		});
 
 		it('should offer the members of an id on $', async () => {

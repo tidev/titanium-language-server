@@ -453,6 +453,38 @@ describe('The TypeScript language service host', () => {
 			service.dispose();
 		});
 
+		it('should leave out a member the type declares away as never, for both project types', async () => {
+			// Label redeclares View.add as never, because a label has no children. Offering it is
+			// offering something that cannot be written, and the view's attributes already leave it out
+			for (const [ fixture, directory ] of [ [ 'classic-project', 'Resources' ], [ 'alloy-project', path.join('app', 'lib') ] ] as const) {
+				const { service, cache, root } = await serviceFor(fixture);
+				const file = path.join(root, directory, 'scratch.js');
+				const text = 'const label = Ti.UI.createLabel();\nlabel.';
+				cache.override(file, text);
+
+				const names = service.completionsAt(file, text.length).map(entry => entry.name);
+
+				assert.ok(names.includes('text'), `expected the rest of the members in ${fixture}`);
+				assert.ok(!names.includes('add'), `expected add to be left out in ${fixture}`);
+
+				service.dispose();
+			}
+		});
+
+		it('should say which completions are deprecated', async () => {
+			const { service, cache, root } = await serviceFor('classic-project');
+			const file = path.join(root, 'Resources', 'scratch.js');
+			const text = 'Ti.UI.';
+			cache.override(file, text);
+
+			const entries = service.completionsAt(file, text.length);
+
+			assert.equal(entries.find(entry => entry.name === 'ATTRIBUTE_LINE_BREAK')?.deprecated, true);
+			assert.equal(entries.find(entry => entry.name === 'SIZE')?.deprecated, false);
+
+			service.dispose();
+		});
+
 		it('should answer the JSDoc for one completion, rather than for all of them', async () => {
 			// a client asks for this when an item is highlighted, so resolving every entry up front
 			// would pay for documentation nobody reads

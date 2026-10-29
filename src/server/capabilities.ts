@@ -1,4 +1,4 @@
-import { CompletionItemKind, MarkupKind, ResourceOperationKind } from 'vscode-languageserver';
+import { CompletionItemKind, CompletionItemTag, MarkupKind, ResourceOperationKind } from 'vscode-languageserver';
 import type { ClientCapabilities as ProtocolCapabilities } from 'vscode-languageserver';
 
 /**
@@ -79,6 +79,16 @@ export class ClientCapabilities {
 	public readonly completionItemKinds: ReadonlySet<CompletionItemKind>;
 
 	/**
+	 * How a completion is marked deprecated, if it can be.
+	 *
+	 * The protocol has two ways and a client may have either. The tag is the current one and wins
+	 * where a client has both; the `deprecated` property is what it replaced, and some clients still
+	 * have only that. A client with neither gets the entry unmarked, which costs it the strike
+	 * through and nothing else.
+	 */
+	public readonly completionDeprecation: 'tag'|'property'|undefined;
+
+	/**
 	 * @param capabilities - What the client declared in its initialize request
 	 */
 	constructor (capabilities: ProtocolCapabilities) {
@@ -91,6 +101,10 @@ export class ClientCapabilities {
 		this.createFiles = Boolean(capabilities.workspace?.workspaceEdit?.documentChanges)
 			&& Boolean(capabilities.workspace?.workspaceEdit?.resourceOperations?.includes(ResourceOperationKind.Create));
 		this.hoverMarkdown = Boolean(capabilities.textDocument?.hover?.contentFormat?.includes(MarkupKind.Markdown));
+		const item = capabilities.textDocument?.completion?.completionItem;
+		this.completionDeprecation = item?.tagSupport?.valueSet.includes(CompletionItemTag.Deprecated) ? 'tag'
+			: item?.deprecatedSupport ? 'property'
+				: undefined;
 		this.completionItemKinds = new Set(
 			capabilities.textDocument?.completion?.completionItemKind?.valueSet ?? originalKinds
 		);

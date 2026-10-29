@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { CompletionItemKind, MarkupKind } from 'vscode-languageserver';
+import { CompletionItemKind, CompletionItemTag, MarkupKind } from 'vscode-languageserver';
 import { ClientCapabilities } from '../../server/capabilities.ts';
 
 describe('server/capabilities', () => {
@@ -120,6 +120,41 @@ describe('server/capabilities', () => {
 		it('should not be supported when the client says nothing', () => {
 			assert.equal(new ClientCapabilities({}).hoverMarkdown, false);
 			assert.equal(new ClientCapabilities({ textDocument: { hover: {} } }).hoverMarkdown, false);
+		});
+	});
+
+	describe('completion deprecation', () => {
+
+		it('should be a tag when the client lists the deprecated tag', () => {
+			const capabilities = new ClientCapabilities({
+				textDocument: { completion: { completionItem: { tagSupport: { valueSet: [ CompletionItemTag.Deprecated ] } } } }
+			});
+
+			assert.equal(capabilities.completionDeprecation, 'tag');
+		});
+
+		it('should be a tag rather than the older property when the client has both', () => {
+			// the property is deprecated in the protocol in favour of the tag, and one is enough
+			const capabilities = new ClientCapabilities({
+				textDocument: { completion: { completionItem: { deprecatedSupport: true, tagSupport: { valueSet: [ CompletionItemTag.Deprecated ] } } } }
+			});
+
+			assert.equal(capabilities.completionDeprecation, 'tag');
+		});
+
+		it('should be the older property for a client that only has that', () => {
+			const capabilities = new ClientCapabilities({
+				textDocument: { completion: { completionItem: { deprecatedSupport: true } } }
+			});
+
+			assert.equal(capabilities.completionDeprecation, 'property');
+		});
+
+		it('should be nothing when the client says nothing, or lists tags without this one', () => {
+			assert.equal(new ClientCapabilities({}).completionDeprecation, undefined);
+			assert.equal(new ClientCapabilities({
+				textDocument: { completion: { completionItem: { tagSupport: { valueSet: [] } } } }
+			}).completionDeprecation, undefined);
 		});
 	});
 

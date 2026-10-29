@@ -8,6 +8,13 @@ renames that heading to its version and date, and starts a new, empty one above 
 
 ## Unreleased
 
+### Controllers and JavaScript
+
+- `$.` offers the view's ids first, ahead of the members every controller has (#PR)
+- Completions follow TypeScript's own ordering: locals before globals, deprecated members last (#PR)
+- Mark deprecated completions, for an editor that can show them struck through (#PR)
+- Stop offering members a type removes, such as `add` on a `Label` (#PR)
+
 ## 0.1.0 - 2026-10-28
 
 The first release: completion, hover, go to definition, warnings and code actions for classic and
