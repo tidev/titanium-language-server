@@ -46,6 +46,7 @@ describe(`The type reader against the real @types/titanium ${VERSION}`, { timeou
 	let cacheRoot: string;
 	let service: ProjectService;
 	let project: Project;
+	let cache: SourceCache;
 
 	before(async () => {
 		cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'ti-ls-e2e-real-types-'));
@@ -56,9 +57,10 @@ describe(`The type reader against the real @types/titanium ${VERSION}`, { timeou
 		project = new Project(await fixturePath('alloy-project'));
 		await project.load();
 
+		cache = new SourceCache();
 		service = await ProjectService.create({
 			project,
-			cache: new SourceCache(),
+			cache,
 			types: { packagePath, entry: path.join(packagePath, 'index.d.ts'), version: VERSION, source: 'npm' }
 		});
 	});
@@ -244,6 +246,38 @@ describe(`The type reader against the real @types/titanium ${VERSION}`, { timeou
 
 			assert.ok(values.includes('Ti.UI.KEYBOARD_TYPE_EMAIL'));
 			assert.ok(!values.some(value => value.startsWith('Ti.UI.KEYBOARD_APPEARANCE_')));
+		});
+	});
+
+	describe('script completions', () => {
+		/**
+		 * The entries a script offers at the end of some text
+		 *
+		 * @param text - What the script says, with the cursor at its end
+		 * @returns The entries
+		 */
+		function completionsAfter (text: string): ReturnType<ProjectService['completionsAt']> {
+			const file = path.join(project.filePath, 'app', 'lib', 'scratch.js');
+			cache.override(file, text);
+			return service.completionsAt(file, text.length);
+		}
+
+		it('should leave out every member a type declares away as never', () => {
+			// five of them on Label, which has no children, and the reason the view's attributes
+			// already leave them out
+			const names = completionsAfter('const label = Ti.UI.createLabel();\nlabel.').map(entry => entry.name);
+
+			assert.ok(names.includes('text'));
+			for (const removed of [ 'add', 'children', 'remove', 'removeAllChildren', 'replaceAt' ]) {
+				assert.ok(!names.includes(removed), `${removed} is never on Label and should not be offered`);
+			}
+		});
+
+		it('should mark what the package deprecates', () => {
+			const entries = completionsAfter('Ti.UI.');
+
+			assert.equal(entries.find(entry => entry.name === 'ATTRIBUTE_LINE_BREAK')?.deprecated, true);
+			assert.equal(entries.find(entry => entry.name === 'SIZE')?.deprecated, false);
 		});
 	});
 });

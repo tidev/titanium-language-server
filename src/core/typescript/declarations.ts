@@ -97,7 +97,9 @@ export class ViewDeclarations {
 		// out before in, and unconditionally: replacing in place works only while the path is
 		// unchanged, and moving between controllers is exactly when it is not
 		this.drop();
-		this.service.setGenerated(declaration, generated.text, generated.map);
+		// preferred, because the ids are what $ is mostly used for and the only part of it that is
+		// this controller's own
+		this.service.setGenerated(declaration, generated.text, generated.map, { preferred: true });
 		this.installed = { controller: controllerPath, declaration, view, text };
 
 		return declaration;

@@ -45,7 +45,28 @@ export interface Completion {
 	name: string;
 	/** TypeScript's own kind — `method`, `property`, `function` — which a client maps to its icons */
 	kind: string;
+	/**
+	 * Where it sorts. TypeScript's own priority, which a client breaks ties in by label, except for
+	 * a member of preferred generated content, which sorts ahead of everything beside it
+	 */
+	sortText: string;
+	/** Whether its JSDoc says `@deprecated`, which a client can show struck through */
+	deprecated: boolean;
 }
+
+/** What a preferred member's sort text starts with: TypeScript's priorities all start higher */
+const PREFERRED = '0';
+
+/** What the type before the dot says about its members, by name */
+interface Receiver {
+	/** Declared by preferred generated content, so offered first */
+	preferred: ReadonlySet<string>;
+	/** Declared away as `never`, so not offered at all */
+	removed: ReadonlySet<string>;
+}
+
+/** The answer when there is no type before a dot to ask */
+const NO_RECEIVER: Receiver = { preferred: new Set(), removed: new Set() };
 
 /**
  * A string literal the cursor is inside, and what it is being written into.
@@ -203,7 +224,7 @@ export class ProjectService {
 	private service: ts.LanguageService;
 	private roots: Set<string>;
 	/** Generated content the service should see as a file, with the mapping back to its source */
-	private virtual = new Map<string, { text: string; version: number; map: PositionMap }>();
+	private virtual = new Map<string, { text: string; version: number; map: PositionMap; preferred: boolean }>();
 	/** What `membersOf` has worked out, for as long as the program it was worked out from lasts */
 	private members = new WeakMap<ts.Program, Map<string, readonly ApiMember[]>>();
 	private built = false;
@@ -365,6 +386,7 @@ export class ProjectService {
 		}
 
 		const completions = this.service.getCompletionsAtPosition(this.ours(filePath), offset, undefined);
+		const { preferred, removed } = completions?.isMemberCompletion ? this.receiverAt(filePath, offset) : NO_RECEIVER;
 
 		// entries carry no position, so nothing here needs mapping — the list is what could be
 		// written, not where anything is
@@ -376,7 +398,51 @@ export class ProjectService {
 			// exactly where the type information is thinnest. TypeScript marks them so that a
 			// client can drop them, which is what this is
 			.filter(entry => entry.kind !== ts.ScriptElementKind.warning)
-			.map(entry => ({ name: entry.name, kind: entry.kind as string }));
+			// a member the type declares away as `never` cannot be written, and offering it is
+			// offering something the types went to the trouble of saying is not there
+			.filter(entry => !removed.has(entry.name))
+			.map(entry => ({
+				name: entry.name,
+				kind: entry.kind as string,
+				sortText: preferred.has(entry.name) ? PREFERRED + entry.sortText : entry.sortText,
+				deprecated: entry.kindModifiers?.split(',').includes(ts.ScriptElementKindModifier.deprecatedModifier) ?? false
+			}));
+	}
+
+	/**
+	 * What the members of the thing before the dot are, beyond what an entry says about itself.
+	 *
+	 * Asked of the receiver's type rather than of the entries, because an entry carries no symbol
+	 * and asking TypeScript for one per entry repeats the whole completion each time. The type is
+	 * one question however many members it has.
+	 *
+	 * @param filePath - The file asked about
+	 * @param offset - Where in it
+	 * @returns {Receiver} The members preferred generated content declares, and those the type removes
+	 * @memberof ProjectService
+	 */
+	private receiverAt (filePath: string, offset: number): Receiver {
+		const program = this.service.getProgram();
+		const source = program?.getSourceFile(this.ours(filePath));
+		const receiver = source ? receiverOf(source, source, offset) : undefined;
+
+		if (!program || !receiver) {
+			return NO_RECEIVER;
+		}
+
+		const checker = program.getTypeChecker();
+		const members = checker.getTypeAtLocation(receiver).getProperties();
+
+		return {
+			// a member of an intersection may be declared on both sides, and one of them being the
+			// view's is enough: an id named like a controller method is still the view's id
+			preferred: new Set(members
+				.filter(member => member.declarations?.some(declaration => this.virtual.get(this.ours(declaration.getSourceFile().fileName))?.preferred))
+				.map(member => member.getName())),
+			removed: new Set(members
+				.filter(member => (checker.getTypeOfSymbolAtLocation(member, receiver).flags & ts.TypeFlags.Never) !== 0)
+				.map(member => member.getName()))
+		};
 	}
 
 	/**
@@ -699,17 +765,23 @@ export class ProjectService {
 	 * Supplies content the service should read as a file, along with the mapping back to what it
 	 * was generated from. Called again for the same path, it replaces what was there.
 	 *
+	 * Preferred content is what is specific to the file being asked about, and its members are
+	 * offered ahead of whatever they are completed beside: a view's ids on `$` sort before the
+	 * `Alloy.Controller` members every controller has.
+	 *
 	 * @param filePath - The path the content stands at
 	 * @param text - The content
 	 * @param map - How its positions map back to source
+	 * @param options - Whether its members are preferred
+	 * @param options.preferred - Whether they sort ahead of the rest
 	 * @memberof ProjectService
 	 */
-	public setGenerated (filePath: string, text: string, map: PositionMap): void {
+	public setGenerated (filePath: string, text: string, map: PositionMap, { preferred = false } = {}): void {
 		// the version has to move or the service serves what it parsed the first time, which
 		// is how a regenerated declaration ends up describing the previous version of a view
 		const file = this.ours(filePath);
 		const version = (this.virtual.get(file)?.version ?? 0) + 1;
-		this.virtual.set(file, { text, version, map });
+		this.virtual.set(file, { text, version, map, preferred });
 		this.roots.add(file);
 	}
 
@@ -847,6 +919,41 @@ function literalAt (node: ts.Node, source: ts.SourceFile, offset: number): ts.St
 		if (offset > child.getFullStart() && offset <= child.getEnd()) {
 			return ts.isStringLiteralLike(child) ? child : literalAt(child, source, offset);
 		}
+	}
+
+	return undefined;
+}
+
+/**
+ * What the cursor is writing a member of, if anything: the `$` in `$.` and `$.la`, in `$.` on a
+ * line of its own above another statement, which a parser reads as one access, and in `$['my-id']`,
+ * which is the only way to write an id with a dash in it.
+ *
+ * The innermost access wins, so `$.label.te` is a question about `$.label` and not about `$`.
+ *
+ * @param node - The node to search
+ * @param source - The file, for resolving positions
+ * @param offset - The offset to find
+ * @returns {ts.Expression|undefined} The expression whose members are being completed
+ */
+function receiverOf (node: ts.Node, source: ts.SourceFile, offset: number): ts.Expression|undefined {
+	const child = node.getChildren(source).find(candidate => offset > candidate.getFullStart() && offset <= candidate.getEnd());
+	const inner = child ? receiverOf(child, source, offset) : undefined;
+	if (inner) {
+		return inner;
+	}
+
+	// past the end of what is before the dot is the dot or the name, which is where a member is
+	// being completed
+	if (ts.isPropertyAccessExpression(node) && offset > node.expression.getEnd()) {
+		return node.expression;
+	}
+
+	// a key is a member only while it is a string being typed: `$[name]` is an expression, and what
+	// it completes is whatever is in scope. The quote is part of the literal and the cursor is past it
+	if (ts.isElementAccessExpression(node) && ts.isStringLiteralLike(node.argumentExpression)
+		&& offset > node.argumentExpression.getStart(source) && offset <= node.argumentExpression.getEnd()) {
+		return node.expression;
 	}
 
 	return undefined;

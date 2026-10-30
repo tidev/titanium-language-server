@@ -68,6 +68,24 @@ function membersOfDollar (service: ProjectService, controller: string, cache: So
 	return service.completionsAt(controller, source.length).map(entry => entry.name);
 }
 
+/**
+ * The names a completion offers, in the order a client shows them: by sort text, and by label
+ * where two sort texts are the same — which is how TypeScript's own priorities are meant to be read
+ *
+ * @param service - The service to ask
+ * @param controller - The controller to ask in
+ * @param cache - The cache holding its buffer
+ * @param source - What the controller says up to the cursor
+ * @param after - What it says after it
+ * @returns {string[]} The names, in order
+ */
+function inClientOrder (service: ProjectService, controller: string, cache: SourceCache, source: string, after = ''): string[] {
+	cache.override(controller, source + after);
+	return service.completionsAt(controller, source.length)
+		.sort((a, b) => a.sortText.localeCompare(b.sortText) || a.name.localeCompare(b.name))
+		.map(entry => entry.name);
+}
+
 describe('The generated $ declaration, per controller', () => {
 
 	it('should stand the declaration at the controller path with its extension swapped', async () => {
@@ -168,5 +186,77 @@ describe('The generated $ declaration, per controller', () => {
 			await declarations.ensure(controller),
 			path.join(root, 'app', 'widgets', 'widget-test', 'controllers', 'widget.views.d.ts')
 		);
+	});
+
+	it('should rank the view\'s ids ahead of what every controller has', async () => {
+		// the ids are what $ is mostly for, and the only part of it specific to this controller.
+		// Both sides of the intersection share TypeScript's priority, so left to it the ids sort
+		// alphabetically among Alloy.Controller's members — `label` after `addClass`, `destroy`
+		// and twenty others
+		const { declarations, service, cache, root } = await owner('alloy-project');
+		const controller = path.join(root, 'app', 'controllers', 'sample.js');
+
+		await declarations.ensure(controller);
+
+		const ids = [ 'androidView', 'container', 'noexistid', 'notificationLabel', 'scrollView' ];
+		const ordered = inClientOrder(service, controller, cache, '$.');
+
+		assert.deepEqual(ordered.slice(0, ids.length), ids);
+		assert.ok(ordered.includes('addClass'), 'expected Alloy.Controller\'s members after them');
+	});
+
+	it('should rank the default id the same as the ids the view writes', async () => {
+		// `$.index` is the view's top level element, and as much this controller's own as any id
+		const { declarations, service, cache, root } = await owner('alloy-project');
+		const controller = path.join(root, 'app', 'controllers', 'index.js');
+
+		await declarations.ensure(controller);
+
+		assert.deepEqual(inClientOrder(service, controller, cache, '$.').slice(0, 2), [ 'index', 'label' ]);
+	});
+
+	it('should rank them with code after the cursor, which a parser reads as part of the access', async () => {
+		// `$.` above another line is `$.$` to the parser, and `$.la` is a name half typed — both
+		// are still a question about the members of $
+		const { declarations, service, cache, root } = await owner('alloy-project');
+		const controller = path.join(root, 'app', 'controllers', 'index.js');
+
+		await declarations.ensure(controller);
+
+		for (const [ before, after ] of [ [ '$.', '\n$.label.text = \'hi\';' ], [ 'foo($.la', ');' ] ]) {
+			const ordered = inClientOrder(service, controller, cache, before, after);
+
+			assert.deepEqual(ordered.slice(0, 2), [ 'index', 'label' ], `expected the ids first in ${JSON.stringify(before + after)}`);
+		}
+	});
+
+	it('should rank them in a bracket access, which is how an id with a dash is written', async () => {
+		// `$.my-label` is a subtraction, so `$['my-label']` is the only way to reach that id
+		const { declarations, service, cache, root } = await owner('alloy-project');
+		const controller = path.join(root, 'app', 'controllers', 'index.js');
+
+		cache.override(path.join(root, 'app', 'views', 'index.xml'), '<Alloy><Window><Label id="my-label"/></Window></Alloy>');
+		await declarations.ensure(controller);
+
+		for (const [ before, after ] of [ [ '$[\'', '\']' ], [ '$["', '' ], [ '$[\'my', '\'];' ] ]) {
+			const ordered = inClientOrder(service, controller, cache, before, after);
+
+			assert.deepEqual(ordered.slice(0, 2), [ 'index', 'my-label' ], `expected the ids first in ${JSON.stringify(before + after)}`);
+		}
+	});
+
+	it('should leave the members of anything but $ in TypeScript\'s own order', async () => {
+		// an id's members are the library's, and nothing about this controller ranks one of them
+		const { declarations, service, cache, root } = await owner('alloy-project');
+		const controller = path.join(root, 'app', 'controllers', 'index.js');
+
+		await declarations.ensure(controller);
+		cache.override(controller, '$.label.');
+
+		const entries = service.completionsAt(controller, '$.label.'.length);
+
+		assert.ok(entries.length > 0, 'expected the members of the id');
+		assert.deepEqual(new Set(entries.map(entry => entry.sortText)), new Set([ entries[0].sortText ]));
+		assert.ok(entries[0].sortText, 'expected TypeScript\'s sort text to be carried through');
 	});
 });
