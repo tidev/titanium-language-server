@@ -455,17 +455,21 @@ describe('The TypeScript language service host', () => {
 
 		it('should leave out a member the type declares away as never, for both project types', async () => {
 			// Label redeclares View.add as never, because a label has no children. Offering it is
-			// offering something that cannot be written, and the view's attributes already leave it out
+			// offering something that cannot be written, and the view's attributes already leave it out.
+			// Written with brackets it is the same member, and TypeScript offers it the same way
 			for (const [ fixture, directory ] of [ [ 'classic-project', 'Resources' ], [ 'alloy-project', path.join('app', 'lib') ] ] as const) {
 				const { service, cache, root } = await serviceFor(fixture);
 				const file = path.join(root, directory, 'scratch.js');
-				const text = 'const label = Ti.UI.createLabel();\nlabel.';
-				cache.override(file, text);
 
-				const names = service.completionsAt(file, text.length).map(entry => entry.name);
+				for (const access of [ 'label.', 'label[\'', 'label["' ]) {
+					const text = `const label = Ti.UI.createLabel();\n${access}`;
+					cache.override(file, text);
 
-				assert.ok(names.includes('text'), `expected the rest of the members in ${fixture}`);
-				assert.ok(!names.includes('add'), `expected add to be left out in ${fixture}`);
+					const names = service.completionsAt(file, text.length).map(entry => entry.name);
+
+					assert.ok(names.includes('text'), `expected the rest of the members after ${access} in ${fixture}`);
+					assert.ok(!names.includes('add'), `expected add to be left out after ${access} in ${fixture}`);
+				}
 
 				service.dispose();
 			}

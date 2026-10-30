@@ -424,14 +424,14 @@ export class ProjectService {
 	private receiverAt (filePath: string, offset: number): Receiver {
 		const program = this.service.getProgram();
 		const source = program?.getSourceFile(this.ours(filePath));
-		const access = source ? accessAt(source, source, offset) : undefined;
+		const receiver = source ? receiverOf(source, source, offset) : undefined;
 
-		if (!program || !access) {
+		if (!program || !receiver) {
 			return NO_RECEIVER;
 		}
 
 		const checker = program.getTypeChecker();
-		const members = checker.getTypeAtLocation(access.expression).getProperties();
+		const members = checker.getTypeAtLocation(receiver).getProperties();
 
 		return {
 			// a member of an intersection may be declared on both sides, and one of them being the
@@ -440,7 +440,7 @@ export class ProjectService {
 				.filter(member => member.declarations?.some(declaration => this.virtual.get(this.ours(declaration.getSourceFile().fileName))?.preferred))
 				.map(member => member.getName())),
 			removed: new Set(members
-				.filter(member => (checker.getTypeOfSymbolAtLocation(member, access.expression).flags & ts.TypeFlags.Never) !== 0)
+				.filter(member => (checker.getTypeOfSymbolAtLocation(member, receiver).flags & ts.TypeFlags.Never) !== 0)
 				.map(member => member.getName()))
 		};
 	}
@@ -925,26 +925,38 @@ function literalAt (node: ts.Node, source: ts.SourceFile, offset: number): ts.St
 }
 
 /**
- * The property access the cursor is writing the name of, if there is one: `$.` and `$.la`, and
- * `$.` on a line of its own above another statement, which a parser reads as one access.
+ * What the cursor is writing a member of, if anything: the `$` in `$.` and `$.la`, in `$.` on a
+ * line of its own above another statement, which a parser reads as one access, and in `$['my-id']`,
+ * which is the only way to write an id with a dash in it.
  *
- * The innermost one wins, so `$.label.te` is a question about `$.label` and not about `$`.
+ * The innermost access wins, so `$.label.te` is a question about `$.label` and not about `$`.
  *
  * @param node - The node to search
  * @param source - The file, for resolving positions
  * @param offset - The offset to find
- * @returns {ts.PropertyAccessExpression|undefined} The access
+ * @returns {ts.Expression|undefined} The expression whose members are being completed
  */
-function accessAt (node: ts.Node, source: ts.SourceFile, offset: number): ts.PropertyAccessExpression|undefined {
+function receiverOf (node: ts.Node, source: ts.SourceFile, offset: number): ts.Expression|undefined {
 	const child = node.getChildren(source).find(candidate => offset > candidate.getFullStart() && offset <= candidate.getEnd());
-	const inner = child ? accessAt(child, source, offset) : undefined;
+	const inner = child ? receiverOf(child, source, offset) : undefined;
 	if (inner) {
 		return inner;
 	}
 
 	// past the end of what is before the dot is the dot or the name, which is where a member is
 	// being completed
-	return ts.isPropertyAccessExpression(node) && offset > node.expression.getEnd() ? node : undefined;
+	if (ts.isPropertyAccessExpression(node) && offset > node.expression.getEnd()) {
+		return node.expression;
+	}
+
+	// a key is a member only while it is a string being typed: `$[name]` is an expression, and what
+	// it completes is whatever is in scope. The quote is part of the literal and the cursor is past it
+	if (ts.isElementAccessExpression(node) && ts.isStringLiteralLike(node.argumentExpression)
+		&& offset > node.argumentExpression.getStart(source) && offset <= node.argumentExpression.getEnd()) {
+		return node.expression;
+	}
+
+	return undefined;
 }
 
 /**

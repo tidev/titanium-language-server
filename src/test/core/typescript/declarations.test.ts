@@ -230,6 +230,21 @@ describe('The generated $ declaration, per controller', () => {
 		}
 	});
 
+	it('should rank them in a bracket access, which is how an id with a dash is written', async () => {
+		// `$.my-label` is a subtraction, so `$['my-label']` is the only way to reach that id
+		const { declarations, service, cache, root } = await owner('alloy-project');
+		const controller = path.join(root, 'app', 'controllers', 'index.js');
+
+		cache.override(path.join(root, 'app', 'views', 'index.xml'), '<Alloy><Window><Label id="my-label"/></Window></Alloy>');
+		await declarations.ensure(controller);
+
+		for (const [ before, after ] of [ [ '$[\'', '\']' ], [ '$["', '' ], [ '$[\'my', '\'];' ] ]) {
+			const ordered = inClientOrder(service, controller, cache, before, after);
+
+			assert.deepEqual(ordered.slice(0, 2), [ 'index', 'my-label' ], `expected the ids first in ${JSON.stringify(before + after)}`);
+		}
+	});
+
 	it('should leave the members of anything but $ in TypeScript\'s own order', async () => {
 		// an id's members are the library's, and nothing about this controller ranks one of them
 		const { declarations, service, cache, root } = await owner('alloy-project');
