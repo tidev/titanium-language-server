@@ -1,6 +1,6 @@
 {
 	"name": "@titanium-sdk/language-server",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"description": "Language server for Titanium and Alloy projects",
 	"license": "Apache-2.0",
 	"repository": {
