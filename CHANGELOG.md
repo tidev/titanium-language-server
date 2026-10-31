@@ -8,7 +8,7 @@ renames that heading to its version and date, and starts a new, empty one above 
 
 ## Unreleased
 
-## 0.1.0 - 2026-10-31
+## 0.1.1 - 2026-10-31
 
 ### Controllers and JavaScript
 
