@@ -8,6 +8,8 @@ renames that heading to its version and date, and starts a new, empty one above 
 
 ## Unreleased
 
+## 0.1.0 - 2026-10-31
+
 ### Controllers and JavaScript
 
 - `$.` offers the view's ids first, ahead of the members every controller has (#83)
