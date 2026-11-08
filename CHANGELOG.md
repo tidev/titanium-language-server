@@ -13,20 +13,20 @@ renames that heading to its version and date, and starts a new, empty one above 
 - Answer the first request in a workspace faster: the types cache is read before npm is asked what
   is published, so a project whose types are already on disk no longer waits for a registry lookup
   to establish a version it already has. npm is still asked when the cache cannot answer, and at
-  least once a day so a new release is picked up (#86)
+  least once a day so a new release is picked up (#89)
 - Resolve `@types/titanium` from the Titanium SDK when it ships them, between the project's own
-  copy and npm (#86)
+  copy and npm (#89)
 
 ### Alloy stylesheets
 
 - Offer selectors at the top level — on a blank line between two rules, above the first, below the
-  last, or in an empty stylesheet — where nothing was offered before (#86)
+  last, or in an empty stylesheet — where nothing was offered before (#89)
 
 ### Diagnosing
 
 - Say in the log why a request was answered nothing: a file in no registered project, a `.tss` in a
   classic project, a stylesheet or view outside `app/styles` or `app/views`, or a project with no
-  language service yet (#86)
+  language service yet (#89)
 
 ## 0.1.1 - 2026-10-31
 
