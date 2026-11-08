@@ -22,6 +22,10 @@ import { logger } from '../../logger.ts';
  * is what avoids hand-rolling a tar reader, and it inherits the user's own registry and proxy
  * configuration, which is usually the difference between working and not behind a corporate proxy.
  *
+ * Spawning it is also the expensive part — around 280ms a run, paid once per project in the
+ * workspace — so when the registry was last asked is recorded beside the versions it answered
+ * with, and `AcquiredTypes` reads that to decide whether it has to be asked again at all.
+ *
  * Nothing here throws. A machine with no network, or no npm, is a normal condition for a language
  * server rather than an error — the resolver falls through to reporting that nothing resolved.
  */
@@ -32,11 +36,26 @@ const packageName = '@types/titanium';
 /** The environment variable that moves the cache */
 const CACHE_VARIABLE = 'TITANIUM_LANGUAGE_SERVER_TYPES_CACHE';
 
+/**
+ * The file in the cache root recording when the registry was last asked what is published.
+ *
+ * A dotfile so a user reading the cache sees versions and one piece of bookkeeping rather than
+ * two kinds of thing, and a file rather than a directory so `cached` skips it without having to
+ * know its name.
+ */
+const CHECKED_FILE = '.last-registry-check';
+
 export interface TypesAcquirer {
 	/** Every version published, or nothing when the registry cannot be reached */
 	versions (): Promise<string[]>;
 	/** Every version already fetched, which is what there is to choose from offline */
 	cached (): Promise<string[]>;
+	/**
+	 * When the registry was last successfully asked what is published, in milliseconds since the
+	 * epoch, or nothing when it never has been. What lets a cached answer be given without asking
+	 * again, and what bounds how long one may be.
+	 */
+	checked (): Promise<number|undefined>;
 	/** Fetches one version and answers where it landed, or nothing when it could not be had */
 	install (version: string): Promise<string|undefined>;
 }
@@ -114,21 +133,72 @@ export class NpmAcquirer implements TypesAcquirer {
 			return [];
 		}
 
+		let parsed: unknown;
 		try {
-			const parsed: unknown = JSON.parse(result.stdout);
-			// npm unwraps a single-element list into a bare string
-			return typeof parsed === 'string' ? [ parsed ] : (parsed as string[]);
+			parsed = JSON.parse(result.stdout);
 		} catch {
 			logger.log(`npm answered with something that is not JSON when listing ${packageName} versions`);
 			return [];
+		}
+
+		// recorded only for an answer, and after it: a run that failed establishes nothing about
+		// what is published, and letting it stand in for a real check would pin the machine to its
+		// cache on the strength of a failure
+		await this.record();
+
+		// npm unwraps a single-element list into a bare string
+		return typeof parsed === 'string' ? [ parsed ] : (parsed as string[]);
+	}
+
+	/**
+	 * When the registry last answered, read back from the cache
+	 *
+	 * @returns {Promise<number|undefined>} The time, or nothing when it has never answered here
+	 * @memberof NpmAcquirer
+	 */
+	public async checked (): Promise<number|undefined> {
+		let written;
+		try {
+			written = await fs.readFile(path.join(this.cacheRoot, CHECKED_FILE), 'utf-8');
+		} catch {
+			// never asked on this machine, or no cache at all yet
+			return;
+		}
+
+		// an ISO timestamp rather than the file's own mtime: a cache directory copied or restored
+		// from somewhere else carries whatever mtime the copy gave it, and what matters is when
+		// the registry answered rather than when the file was last touched
+		const at = Date.parse(written.trim());
+		return Number.isNaN(at) ? undefined : at;
+	}
+
+	/**
+	 * Records that the registry has just answered.
+	 *
+	 * Written as text a person can read, since this sits in a directory users do look in. A cache
+	 * root that cannot be written costs the staleness check and nothing else — the versions have
+	 * already been answered by the time this runs — so it is logged rather than propagated.
+	 *
+	 * @returns {Promise<void>} When it has been recorded, or failed to be
+	 * @memberof NpmAcquirer
+	 */
+	private async record (): Promise<void> {
+		try {
+			// the first run of all asks the registry before anything has been installed, so the
+			// directory this goes in may not exist yet
+			await fs.mkdir(this.cacheRoot, { recursive: true });
+			await fs.writeFile(path.join(this.cacheRoot, CHECKED_FILE), `${new Date().toISOString()}\n`);
+		} catch (error) {
+			logger.log(`Could not record that npm was asked for ${packageName} versions, so it will be asked again: ${message(error)}`);
 		}
 	}
 
 	/**
 	 * Every version already in the cache.
 	 *
-	 * Read from the disk and never from npm, because this is what there is to choose from when
-	 * npm cannot reach the registry. Only a version whose package is complete counts: npm creates
+	 * Read from the disk and never from npm, because this is what the common case answers from and
+	 * what there is to choose from when npm cannot reach the registry. Only a version whose package
+	 * is complete counts: npm creates
 	 * the prefix before it has fetched anything and the package directory before it has finished
 	 * extracting, so an install that stopped part way leaves a directory named for a version it
 	 * does not hold. Choosing one of those would fail later, with nothing else tried.

@@ -34,12 +34,25 @@ function fakeRunner (answers: CommandResult[]): { run: CommandRunner; calls: Rec
 const ok = (stdout: string): CommandResult => ({ code: 0, stdout, stderr: '' });
 const failed = (stderr: string): CommandResult => ({ code: 1, stdout: '', stderr });
 
+/**
+ * A cache root of its own, in a temporary directory.
+ *
+ * Every acquirer a test builds gets one. `NpmAcquirer` defaults to `~/.titanium/types`, and
+ * `versions` writes the record of its check there, so an acquirer built without one would have
+ * `npm test` writing into the home directory of whoever ran it.
+ *
+ * @returns {Promise<string>} An empty directory
+ */
+async function cacheRoot (): Promise<string> {
+	return fs.mkdtemp(path.join(os.tmpdir(), 'ti-ls-acquire-'));
+}
+
 describe('Acquiring @types/titanium', () => {
 
 	describe('the cache directory', () => {
 		it('should key the cache on the version, so two projects on different SDKs coexist', async () => {
 			// the same shape TypeScript's own automatic type acquisition uses
-			const root = await fs.mkdtemp(path.join(os.tmpdir(), 'ti-ls-acquire-'));
+			const root = await cacheRoot();
 			const { run, calls } = fakeRunner([ ok(''), ok('') ]);
 			const acquirer = new NpmAcquirer({ run, cacheRoot: root });
 
@@ -58,7 +71,7 @@ describe('Acquiring @types/titanium', () => {
 	describe('listing published versions', () => {
 		it('should read the versions npm reports', async () => {
 			const { run, calls } = fakeRunner([ ok('["9.2.2","12.0.8","13.3.0"]') ]);
-			const acquirer = new NpmAcquirer({ run });
+			const acquirer = new NpmAcquirer({ run, cacheRoot: await cacheRoot() });
 
 			assert.deepEqual(await acquirer.versions(), [ '9.2.2', '12.0.8', '13.3.0' ]);
 			assert.equal(calls[0].command, 'npm');
@@ -69,7 +82,7 @@ describe('Acquiring @types/titanium', () => {
 		it('should read a single version, which npm reports unwrapped', async () => {
 			// `npm view <pkg> versions --json` answers with a bare string when only one exists
 			const { run } = fakeRunner([ ok('"13.3.0"') ]);
-			const acquirer = new NpmAcquirer({ run });
+			const acquirer = new NpmAcquirer({ run, cacheRoot: await cacheRoot() });
 
 			assert.deepEqual(await acquirer.versions(), [ '13.3.0' ]);
 		});
@@ -78,7 +91,7 @@ describe('Acquiring @types/titanium', () => {
 			// a locked-down machine is not an error worth throwing over: the resolver falls through
 			// to reporting that nothing resolved
 			const { run } = fakeRunner([ failed('ENOTFOUND registry.npmjs.org') ]);
-			const acquirer = new NpmAcquirer({ run });
+			const acquirer = new NpmAcquirer({ run, cacheRoot: await cacheRoot() });
 
 			assert.deepEqual(await acquirer.versions(), []);
 		});
@@ -87,7 +100,8 @@ describe('Acquiring @types/titanium', () => {
 			const acquirer = new NpmAcquirer({
 				run: async () => {
 					throw new Error('spawn npm ENOENT');
-				}
+				},
+				cacheRoot: await cacheRoot()
 			});
 
 			assert.deepEqual(await acquirer.versions(), []);
@@ -95,9 +109,106 @@ describe('Acquiring @types/titanium', () => {
 
 		it('should answer nothing when npm prints something that is not JSON', async () => {
 			const { run } = fakeRunner([ ok('npm warn deprecated something') ]);
-			const acquirer = new NpmAcquirer({ run });
+			const acquirer = new NpmAcquirer({ run, cacheRoot: await cacheRoot() });
 
 			assert.deepEqual(await acquirer.versions(), []);
+		});
+	});
+
+	describe('when the registry was last asked', () => {
+		it('should answer nothing on a machine that has never asked', async () => {
+			const root = await cacheRoot();
+
+			assert.equal(await new NpmAcquirer({ cacheRoot: root }).checked(), undefined);
+		});
+
+		it('should answer nothing when there is no cache directory at all', async () => {
+			const root = path.join(await cacheRoot(), 'never-created');
+
+			assert.equal(await new NpmAcquirer({ cacheRoot: root }).checked(), undefined);
+		});
+
+		it('should record the check when npm answered', async () => {
+			const root = await cacheRoot();
+			const { run } = fakeRunner([ ok('["13.3.0"]') ]);
+			const acquirer = new NpmAcquirer({ run, cacheRoot: root });
+
+			const before = Date.now();
+			await acquirer.versions();
+			const checked = await acquirer.checked();
+
+			assert.ok(checked !== undefined, 'expected the check to have been recorded');
+			assert.ok(checked >= before - 1000 && checked <= Date.now() + 1000, `${checked} is not around now`);
+		});
+
+		it('should create the cache directory to record the check in', async () => {
+			// the first ever run asks the registry before anything has been installed, so there is
+			// no directory yet
+			const root = path.join(await cacheRoot(), 'not-yet');
+			const { run } = fakeRunner([ ok('["13.3.0"]') ]);
+			const acquirer = new NpmAcquirer({ run, cacheRoot: root });
+
+			await acquirer.versions();
+
+			assert.notEqual(await acquirer.checked(), undefined);
+		});
+
+		it('should not record a check the registry could not answer', async () => {
+			// a failed check establishes nothing about what is published, so letting it stand in
+			// for a real one would pin the machine to its cache on the strength of a failure
+			const root = await cacheRoot();
+			const { run } = fakeRunner([ failed('ENOTFOUND registry.npmjs.org') ]);
+			const acquirer = new NpmAcquirer({ run, cacheRoot: root });
+
+			await acquirer.versions();
+
+			assert.equal(await acquirer.checked(), undefined);
+		});
+
+		it('should not record a check npm could not even be spawned for', async () => {
+			const root = await cacheRoot();
+			const acquirer = new NpmAcquirer({
+				run: async () => {
+					throw new Error('spawn npm ENOENT');
+				},
+				cacheRoot: root
+			});
+
+			await acquirer.versions();
+
+			assert.equal(await acquirer.checked(), undefined);
+		});
+
+		it('should answer nothing when the record is not a timestamp', async () => {
+			// a hand-edited or truncated file reads as never having asked, which costs one npm run
+			// rather than an answer nobody can account for
+			const root = await cacheRoot();
+			await fs.writeFile(path.join(root, '.last-registry-check'), 'whenever');
+
+			assert.equal(await new NpmAcquirer({ cacheRoot: root }).checked(), undefined);
+		});
+
+		it('should not let the record be read as a cached version', async () => {
+			const root = await cacheRoot();
+			const { run } = fakeRunner([ ok('["13.3.0"]') ]);
+			const acquirer = new NpmAcquirer({ run, cacheRoot: root });
+
+			await acquirer.versions();
+
+			assert.deepEqual(await acquirer.cached(), [], 'the record is a file, and only directories are versions');
+		});
+
+		it('should survive a cache root it cannot write to', async () => {
+			// a read-only home directory costs the staleness check and nothing else
+			const root = await cacheRoot();
+			await fs.chmod(root, 0o500);
+			const { run } = fakeRunner([ ok('["13.3.0"]') ]);
+			const acquirer = new NpmAcquirer({ run, cacheRoot: root });
+
+			assert.deepEqual(await acquirer.versions(), [ '13.3.0' ], 'the versions still answer');
+			assert.equal(await acquirer.checked(), undefined);
+
+			await fs.chmod(root, 0o700);
 		});
 	});
 
@@ -105,7 +216,7 @@ describe('Acquiring @types/titanium', () => {
 		it('should install with --ignore-scripts', async () => {
 			// a postinstall script from a fetched package running inside a language server is the
 			// one risk this step actually carries, and it is what TypeScript's own installer does
-			const root = await fs.mkdtemp(path.join(os.tmpdir(), 'ti-ls-acquire-'));
+			const root = await cacheRoot();
 			const { run, calls } = fakeRunner([ ok('') ]);
 			const acquirer = new NpmAcquirer({ run, cacheRoot: root });
 
@@ -117,7 +228,7 @@ describe('Acquiring @types/titanium', () => {
 		});
 
 		it('should answer where the package landed', async () => {
-			const root = await fs.mkdtemp(path.join(os.tmpdir(), 'ti-ls-acquire-'));
+			const root = await cacheRoot();
 			const installed = path.join(root, '13.3.0', 'node_modules', '@types', 'titanium');
 			const { run } = fakeRunner([ ok('') ]);
 			const acquirer = new NpmAcquirer({
@@ -136,7 +247,7 @@ describe('Acquiring @types/titanium', () => {
 		it('should not run npm again for a version already in the cache', async () => {
 			// the second project on the same SDK, and every restart after the first, should cost
 			// nothing and work offline
-			const root = await fs.mkdtemp(path.join(os.tmpdir(), 'ti-ls-acquire-'));
+			const root = await cacheRoot();
 			const installed = path.join(root, '13.3.0', 'node_modules', '@types', 'titanium');
 			await fs.mkdir(installed, { recursive: true });
 			await fs.writeFile(path.join(installed, 'index.d.ts'), 'declare const Ti: unknown;');
@@ -151,7 +262,7 @@ describe('Acquiring @types/titanium', () => {
 		it('should run npm again over a package that was only partly written', async () => {
 			// the directory alone is not a cache hit: without its declarations it is a failed
 			// install, and answering it would fail later with nothing retried
-			const root = await fs.mkdtemp(path.join(os.tmpdir(), 'ti-ls-acquire-'));
+			const root = await cacheRoot();
 			await fs.mkdir(path.join(root, '13.3.0', 'node_modules', '@types', 'titanium'), { recursive: true });
 
 			const { run, calls } = fakeRunner([ ok('') ]);
@@ -161,7 +272,7 @@ describe('Acquiring @types/titanium', () => {
 		});
 
 		it('should answer nothing when the install fails', async () => {
-			const root = await fs.mkdtemp(path.join(os.tmpdir(), 'ti-ls-acquire-'));
+			const root = await cacheRoot();
 			const { run } = fakeRunner([ failed('ENOTFOUND registry.npmjs.org') ]);
 			const acquirer = new NpmAcquirer({ run, cacheRoot: root });
 
@@ -171,7 +282,7 @@ describe('Acquiring @types/titanium', () => {
 		it('should answer nothing when npm reports success but writes no package', async () => {
 			// npm exiting zero is not proof the package is there, and a path that does not exist
 			// would fail later and further away
-			const root = await fs.mkdtemp(path.join(os.tmpdir(), 'ti-ls-acquire-'));
+			const root = await cacheRoot();
 			const { run } = fakeRunner([ ok('') ]);
 			const acquirer = new NpmAcquirer({ run, cacheRoot: root });
 
@@ -179,7 +290,7 @@ describe('Acquiring @types/titanium', () => {
 		});
 
 		it('should answer nothing when npm cannot be spawned', async () => {
-			const root = await fs.mkdtemp(path.join(os.tmpdir(), 'ti-ls-acquire-'));
+			const root = await cacheRoot();
 			const acquirer = new NpmAcquirer({
 				run: async () => {
 					throw new Error('spawn npm ENOENT');
@@ -199,7 +310,7 @@ describe('Acquiring @types/titanium', () => {
 		 * @returns {Promise<string>} The cache root
 		 */
 		async function cacheWith (...versions: string[]): Promise<string> {
-			const root = await fs.mkdtemp(path.join(os.tmpdir(), 'ti-ls-acquire-'));
+			const root = await cacheRoot();
 			for (const version of versions) {
 				const installed = path.join(root, version, 'node_modules', '@types', 'titanium');
 				await fs.mkdir(installed, { recursive: true });

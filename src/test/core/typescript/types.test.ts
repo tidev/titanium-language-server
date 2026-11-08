@@ -29,14 +29,20 @@ const published = [ '3.5.30', '7.3.1', '8.0.5', '9.2.2', '12.0.8', '13.3.0' ];
  * @param available - The versions it should claim are published
  * @returns The acquirer and the versions it was asked to install
  */
-function fakeAcquirer (available: string[] = published, cached: string[] = []): { acquirer: TypesAcquirer; installed: string[] } {
+function fakeAcquirer (available: string[] = published, cached: string[] = [], checked?: number): { acquirer: TypesAcquirer; installed: string[]; asked: () => number } {
 	const installed: string[] = [];
+	let asked = 0;
 
 	return {
 		installed,
+		asked: () => asked,
 		acquirer: {
-			versions: async () => available,
+			versions: async () => {
+				asked++;
+				return available;
+			},
 			cached: async () => cached,
+			checked: async () => checked,
 			install: async version => {
 				installed.push(version);
 				const root = await fs.mkdtemp(path.join(os.tmpdir(), 'ti-ls-types-'));
@@ -54,8 +60,15 @@ function fakeAcquirer (available: string[] = published, cached: string[] = []): 
 const offlineAcquirer: TypesAcquirer = {
 	versions: async () => [],
 	cached: async () => [],
+	checked: async () => undefined,
 	install: async () => undefined
 };
+
+/** A check recorded just now, which is a cache the registry was asked about this session */
+const justNow = (): number => Date.now();
+
+/** A check recorded two days ago, which is past the staleness window */
+const longAgo = (): number => Date.now() - (2 * 24 * 60 * 60 * 1000);
 
 describe('Resolving @types/titanium', () => {
 
@@ -159,10 +172,107 @@ describe('Resolving @types/titanium', () => {
 			assert.equal(await new AcquiredTypes(acquirer).locate(await project('alloy-project')), undefined);
 		});
 
+		it('should answer from a recently checked cache without asking npm at all', async () => {
+			// the measured cost of the first request: two `npm view` spawns, one per project in the
+			// workspace, each establishing a version already sitting on disk
+			const { acquirer, installed, asked } = fakeAcquirer(published, [ '12.0.8' ], justNow());
+
+			const resolved = await new AcquiredTypes(acquirer).locate(await project('classic-project'));
+
+			assert.equal(asked(), 0, 'the registry must not be asked when the cache was just checked');
+			assert.deepEqual(installed, [ '12.0.8' ]);
+			assert.equal(resolved?.location?.version, '12.0.8');
+			assert.equal(resolved.report.level, 'info');
+		});
+
+		it('should not say the registry was unreachable when it was simply not asked', async () => {
+			// the two conditions are different and the message must not collapse them: a fresh
+			// cache answered on purpose, and an unreachable registry answered for want of anything
+			// better
+			const { acquirer } = fakeAcquirer(published, [ '12.0.8' ], justNow());
+
+			const resolved = await new AcquiredTypes(acquirer).locate(await project('classic-project'));
+
+			assert.doesNotMatch(resolved?.report.message ?? '', /could not be reached/);
+			assert.match(resolved?.report.message ?? '', /from the cache/, 'should still say where it came from');
+			assert.match(resolved?.report.message ?? '', /last asked/, 'should say when npm was last asked, so the user can see why');
+		});
+
+		it('should ask npm again once the cache has gone stale', async () => {
+			// a staleness window rather than a machine pinned forever to whatever it fetched first
+			const { acquirer, installed, asked } = fakeAcquirer(published, [ '12.0.2' ], longAgo());
+
+			await new AcquiredTypes(acquirer).locate(await project('classic-project'));
+
+			assert.equal(asked(), 1);
+			assert.deepEqual(installed, [ '12.0.8' ], 'the newer release published since should win');
+		});
+
+		it('should ask npm when nothing has ever been checked', async () => {
+			const { acquirer, asked } = fakeAcquirer(published, [ '12.0.8' ], undefined);
+
+			await new AcquiredTypes(acquirer).locate(await project('classic-project'));
+
+			assert.equal(asked(), 1, 'a cache nobody has checked says nothing about what is published');
+		});
+
+		it('should ask npm when the cache holds nothing for the SDK, however recently checked', async () => {
+			const { acquirer, asked, installed } = fakeAcquirer(published, [], justNow());
+
+			await new AcquiredTypes(acquirer).locate(await project('classic-project'));
+
+			assert.equal(asked(), 1);
+			assert.deepEqual(installed, [ '12.0.8' ]);
+		});
+
+		it('should ask npm rather than settle for a cached older major', async () => {
+			// alloy-project is on 10.1.0.GA, and a cached 9.2.2 is the best the cache can do.
+			// Crossing a major is the answer most worth getting right and the rarest, so it is
+			// never taken on trust from a cache
+			const { acquirer, asked } = fakeAcquirer(published, [ '9.2.2' ], justNow());
+
+			const resolved = await new AcquiredTypes(acquirer).locate(await project('alloy-project'));
+
+			assert.equal(asked(), 1);
+			assert.match(resolved?.report.message ?? '', /is published/, 'the registry answered, so it can say so');
+		});
+
+		it('should treat a check recorded in the future as no check at all', async () => {
+			// a clock moved backwards, or a cache copied from another machine
+			const { acquirer, asked } = fakeAcquirer(published, [ '12.0.8' ], Date.now() + (60 * 60 * 1000));
+
+			await new AcquiredTypes(acquirer).locate(await project('classic-project'));
+
+			assert.equal(asked(), 1);
+		});
+
+		it('should still answer from the cache when a stale check cannot be refreshed', async () => {
+			// the laptop on a train whose window has expired: the registry is asked, fails, and
+			// the cache answers with the message that says so
+			const { acquirer } = fakeAcquirer([], [ '12.0.8' ], longAgo());
+
+			const resolved = await new AcquiredTypes(acquirer).locate(await project('classic-project'));
+
+			assert.equal(resolved?.location?.version, '12.0.8');
+			assert.match(resolved.report.message, /could not be reached/);
+		});
+
+		it('should resolve nothing when the install of a cached version fails', async () => {
+			const acquirer: TypesAcquirer = {
+				versions: async () => published,
+				cached: async () => [ '12.0.8' ],
+				checked: async () => justNow(),
+				install: async () => undefined
+			};
+
+			assert.equal(await new AcquiredTypes(acquirer).locate(await project('classic-project')), undefined);
+		});
+
 		it('should resolve nothing when the install itself fails', async () => {
 			const acquirer: TypesAcquirer = {
 				versions: async () => published,
 				cached: async () => [],
+				checked: async () => undefined,
 				install: async () => undefined
 			};
 
