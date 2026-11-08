@@ -199,16 +199,21 @@ describe('Acquiring @types/titanium', () => {
 		});
 
 		it('should survive a cache root it cannot write to', async () => {
-			// a read-only home directory costs the staleness check and nothing else
-			const root = await cacheRoot();
-			await fs.chmod(root, 0o500);
+			// a read-only home directory costs the staleness check and nothing else: the versions
+			// have already been answered by the time the record is written.
+			//
+			// Blocked by putting a file where the root's parent directory would be, rather than by
+			// chmod. `fs.chmod` on Windows only toggles the read-only bit and does not stop a
+			// directory being written, so the chmod version of this passed everywhere and then
+			// failed on both Windows jobs. A path whose ancestor is a file cannot be created on any
+			// platform, which is the same catch reached deterministically
+			const blocked = path.join(await cacheRoot(), 'in-the-way');
+			await fs.writeFile(blocked, 'not a directory');
 			const { run } = fakeRunner([ ok('["13.3.0"]') ]);
-			const acquirer = new NpmAcquirer({ run, cacheRoot: root });
+			const acquirer = new NpmAcquirer({ run, cacheRoot: path.join(blocked, 'types') });
 
 			assert.deepEqual(await acquirer.versions(), [ '13.3.0' ], 'the versions still answer');
-			assert.equal(await acquirer.checked(), undefined);
-
-			await fs.chmod(root, 0o700);
+			assert.equal(await acquirer.checked(), undefined, 'nothing was recorded, so the registry is asked again');
 		});
 	});
 
