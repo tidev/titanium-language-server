@@ -58,8 +58,13 @@ export async function styleCompletionsAt (context: StyleCompletionContext): Prom
 	}
 
 	const at = nodeAt(parseTss(context.style.text), context.offset);
+
+	// no rule holds the cursor, so it is at the top level: between two rules, above the first,
+	// below the last, or in a stylesheet with nothing in it yet. A selector is the only thing
+	// that can be written there, and standing on the blank line between two rules and asking is
+	// the obvious way to start writing a new one
 	if (!at) {
-		return [];
+		return selectorCompletions(context);
 	}
 
 	if (at.kind === 'selector') {
@@ -88,13 +93,17 @@ export async function styleCompletionsAt (context: StyleCompletionContext): Prom
 
 /**
  * The selectors that could be written: the tags a stylesheet can style, and the classes and ids
- * of the views it applies to
+ * of the views it applies to.
+ *
+ * Without a rule the cursor is at the top level, where there is no `"…": {}` around it for a name
+ * to be accepted into — so each entry writes the whole rule instead, replacing nothing but the
+ * cursor. A bare name written there is something Alloy will not parse.
  *
  * @param context - The stylesheet and its readers
- * @param rule - The rule whose selector is being written
+ * @param rule - The rule whose selector is being written, when the cursor is in one
  * @returns {Promise<ViewCompletion[]>} The selectors
  */
-async function selectorCompletions (context: StyleCompletionContext, rule: TssRule): Promise<ViewCompletion[]> {
+async function selectorCompletions (context: StyleCompletionContext, rule?: TssRule): Promise<ViewCompletion[]> {
 	// only a tag that creates a Titanium type can be styled: Alloy's own markup has no proxy for
 	// a style to be applied to
 	const tags = [ ...new Set([ ...context.api.titaniumTags(), ...alloyTags() ]) ]
@@ -105,13 +114,33 @@ async function selectorCompletions (context: StyleCompletionContext, rule: TssRu
 	const distinct = (kind: 'class'|'id'): string[] =>
 		[ ...new Set(index.usages.filter(usage => usage.kind === kind).map(usage => usage.name)) ].sort();
 
-	const range = selectorNameRange(rule, context.offset);
+	const range = rule ? selectorNameRange(rule, context.offset) : { start: context.offset, end: context.offset };
 
-	return [
+	const entries = [
 		...named(tags, 'class', range),
 		...named(distinct('class').map(name => `.${name}`), 'class', range),
 		...named(distinct('id').map(name => `#${name}`), 'property', range)
 	];
+
+	return rule ? entries : entries.map(entry => ({ ...entry, insert: wholeRule(entry.label, context.style.text) }));
+}
+
+/**
+ * A selector as the whole rule it needs to become, in the quote the stylesheet already uses.
+ *
+ * The snippet leaves the cursor in the body, which is where the next thing written goes. A client
+ * with no snippet engine gets the same text without it — `named` is what picks between the two.
+ *
+ * @param selector - The selector name
+ * @param text - The stylesheet, to read which quote it writes
+ * @returns The two forms of the insertion
+ */
+function wholeRule (selector: string, text: string): { snippet: string; plain: string } {
+	const quote = quoteOf(text);
+	return {
+		snippet: `${quote}${selector}${quote}: {\n\t$0\n}`,
+		plain: `${quote}${selector}${quote}: {\n\t\n}`
+	};
 }
 
 /**
