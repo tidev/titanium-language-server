@@ -8,6 +8,26 @@ renames that heading to its version and date, and starts a new, empty one above 
 
 ## Unreleased
 
+### Projects
+
+- Answer the first request in a workspace faster: the types cache is read before npm is asked what
+  is published, so a project whose types are already on disk no longer waits for a registry lookup
+  to establish a version it already has. npm is still asked when the cache cannot answer, and at
+  least once a day so a new release is picked up (#86)
+- Resolve `@types/titanium` from the Titanium SDK when it ships them, between the project's own
+  copy and npm (#86)
+
+### Alloy stylesheets
+
+- Offer selectors at the top level — on a blank line between two rules, above the first, below the
+  last, or in an empty stylesheet — where nothing was offered before (#86)
+
+### Diagnosing
+
+- Say in the log why a request was answered nothing: a file in no registered project, a `.tss` in a
+  classic project, a stylesheet or view outside `app/styles` or `app/views`, or a project with no
+  language service yet (#86)
+
 ## 0.1.1 - 2026-10-31
 
 ### Controllers and JavaScript
