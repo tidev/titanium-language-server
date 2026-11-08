@@ -85,6 +85,16 @@ function versionUsed (client: LspTestClient): string|undefined {
 	}
 }
 
+/**
+ * Everything the server logged, which is where it says what it resolved and how
+ *
+ * @param client - The server
+ * @returns {string[]} The messages, in the order they arrived
+ */
+function logged (client: LspTestClient): string[] {
+	return client.notifications.map(message => (message.params as { message?: string }|undefined)?.message ?? '');
+}
+
 describe('Acquiring @types/titanium from npm, end to end', { timeout: TIMEOUT * 4 }, () => {
 
 	let typesCache: string;
@@ -150,13 +160,14 @@ describe('Acquiring @types/titanium from npm, end to end', { timeout: TIMEOUT * 
 		});
 	});
 
-	describe('a second run, offline, against the warm cache', () => {
+	describe('a second run against a cache the registry was just asked about', () => {
 		let client: LspTestClient;
 		let root: string;
 
 		before(async () => {
-			// the registry is unreachable now: npm answers only from an empty cache of its own. So
-			// anything the server offers came from the types cache the first run filled
+			// npm can reach nothing here, and must not be asked at all: the runs above left a
+			// record of the registry answering moments ago, which is what lets the cache answer
+			// on its own
 			({ client, root } = await serverOn('classic-untyped-project', typesCache, false));
 		});
 
@@ -168,11 +179,61 @@ describe('Acquiring @types/titanium from npm, end to end', { timeout: TIMEOUT * 
 			assert.ok(labels.includes('text'), `expected Label's members from the cache, got ${labels.slice(0, 20).join(', ')}`);
 		});
 
-		it('should say it chose from the cache, and why', () => {
-			const logged = client.notifications.map(message => (message.params as { message?: string }|undefined)?.message ?? '');
+		it('should not have asked npm anything', () => {
+			// the whole saving: npm is not spawned per project to establish a version already on
+			// disk. Offline, an attempt would have logged that it could not be made
+			assert.ok(!logged(client).some(text => /Could not ask npm for @types\/titanium versions/.test(text)),
+				`expected no npm lookup at all, got:\n${logged(client).join('\n')}`);
+		});
 
-			assert.ok(logged.some(text => /from the cache because the npm registry could not be reached/.test(text)),
-				'expected the log to say why the registry was not consulted');
+		it('should say it answered from the cache, and when npm was last asked', () => {
+			assert.ok(logged(client).some(text => /from the cache; npm was last asked what is published/.test(text)),
+				`expected the log to say when the cache was last checked, got:\n${logged(client).join('\n')}`);
+		});
+
+		it('should not claim the registry could not be reached, since nobody asked it', () => {
+			// it could not be, as it happens — but that is not why the cache answered, and saying
+			// so would send a user looking for a network problem that had no part in this
+			assert.ok(!logged(client).some(text => /could not be reached/.test(text)),
+				`expected no unreachable-registry message, got:\n${logged(client).join('\n')}`);
+		});
+	});
+
+	describe('a second run, offline, against a cache nobody has checked lately', () => {
+		let client: LspTestClient;
+		let root: string;
+
+		before(async () => {
+			// back-dated past the staleness window, so the registry is asked for real — and
+			// fails, which is the condition the message below is about. The name is the acquirer's
+			// own record, which lives beside the version directories
+			await fs.writeFile(path.join(typesCache, '.last-registry-check'), new Date(Date.now() - (2 * 24 * 60 * 60 * 1000)).toISOString());
+
+			({ client, root } = await serverOn('classic-untyped-project', typesCache, false));
+		});
+
+		after(async () => client.dispose());
+
+		it('should still offer what the fetched types know', async () => {
+			// the finding this tier was written for: a warm cache has to work with no registry at
+			// all, which it did not when the version list was fetched before the cache was read
+			const labels = await labelsAt(client, path.join(root, 'Resources', 'scratch.js'), 'javascript', 'const label = Ti.UI.createLabel();\nlabel.|');
+
+			assert.ok(labels.includes('text'), `expected Label's members from the cache, got ${labels.slice(0, 20).join(', ')}`);
+		});
+
+		it('should say it chose from the cache, and why', () => {
+			assert.ok(logged(client).some(text => /from the cache because the npm registry could not be reached/.test(text)),
+				`expected the log to say why the registry was not consulted, got:\n${logged(client).join('\n')}`);
+		});
+
+		it('should not have recorded a check the registry never answered', async () => {
+			// a failed lookup establishes nothing about what is published, so it must not stand in
+			// for a real check and pin the machine to its cache
+			const recorded = await fs.readFile(path.join(typesCache, '.last-registry-check'), 'utf-8');
+
+			assert.ok(Date.now() - Date.parse(recorded.trim()) > 24 * 60 * 60 * 1000,
+				`expected the stale record to be left alone, got ${recorded.trim()}`);
 		});
 	});
 });
