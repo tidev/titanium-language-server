@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { fileKind, fileRole, isTiapp, route } from '../../core/routing.ts';
+import { fileKind, fileRole, isTiapp, noProjectReason, noRoleReason, route } from '../../core/routing.ts';
 import { Project } from '../../core/project.ts';
 import { ProjectRegistry } from '../../core/registry.ts';
 import { fixturePath } from '../fixtures.ts';
@@ -136,6 +136,119 @@ describe('Routing', () => {
 			const registry = new ProjectRegistry();
 
 			assert.equal(await route(registry, '/somewhere/app/views/index.xml', 'xml'), undefined);
+		});
+	});
+
+	describe('why a document could not be answered for', () => {
+		/**
+		 * A registry with the Alloy fixture in it
+		 *
+		 * @returns The registry and the fixture's path
+		 */
+		async function withAlloy (): Promise<{ registry: ProjectRegistry; root: string }> {
+			const registry = new ProjectRegistry();
+			const root = await fixturePath('alloy-project');
+			await registry.add([ root ]);
+			return { registry, root };
+		}
+
+		it('should say when the file is outside every folder the editor opened', async () => {
+			const { registry, root } = await withAlloy();
+
+			const reason = noProjectReason(registry, path.join(path.sep, 'elsewhere', 'index.tss'), [ root ]);
+
+			assert.match(reason, /not inside any folder the editor opened/);
+		});
+
+		it('should say when the folder holds no registered project at all', async () => {
+			// the scan depth is deliberate, so the answer is to open the project's own folder
+			const registry = new ProjectRegistry();
+			const root = await fixturePath('not-a-project');
+			await registry.add([ root ]);
+
+			const reason = noProjectReason(registry, path.join(root, 'app', 'styles', 'index.tss'), [ root ]);
+
+			assert.match(reason, /No Titanium project is registered under/);
+			assert.match(reason, /directly inside/);
+			assert.match(reason, /sdk-version/);
+		});
+
+		it('should name the projects there are when the file is in none of them', async () => {
+			// a workspace folder holding a project beside something that is not one
+			const fixtures = path.dirname(await fixturePath('alloy-project'));
+			const registry = new ProjectRegistry();
+			await registry.add([ fixtures ]);
+
+			const reason = noProjectReason(registry, path.join(fixtures, 'not-a-project', 'index.tss'), [ fixtures ]);
+
+			assert.match(reason, /not inside any of the projects registered under/);
+			assert.match(reason, /alloy-project/, 'should name what is registered, so the user can see the difference');
+		});
+
+		it('should say a classic project gives a stylesheet no Alloy role', async () => {
+			const registry = new ProjectRegistry();
+			const root = await fixturePath('classic-project');
+			await registry.add([ root ]);
+			const routed = await route(registry, path.join(root, 'Resources', 'app.tss'), 'tss');
+
+			assert.match(await noRoleReason(routed!), /is a classic project/);
+			assert.match(await noRoleReason(routed!), /Alloy/);
+		});
+
+		it('should say a stylesheet is outside app/styles, and where else Alloy looks', async () => {
+			const { registry, root } = await withAlloy();
+			const routed = await route(registry, path.join(root, 'app', 'assets', 'index.tss'), 'tss');
+
+			const reason = await noRoleReason(routed!);
+
+			assert.match(reason, /stylesheet outside app\/styles/);
+			assert.match(reason, /app\/widgets/, 'a widget\'s stylesheets are somewhere else again');
+			assert.match(reason, /app\/themes/);
+		});
+
+		it('should say a view is outside app/views', async () => {
+			const { registry, root } = await withAlloy();
+			const routed = await route(registry, path.join(root, 'app', 'assets', 'index.xml'), 'xml');
+
+			assert.match(await noRoleReason(routed!), /view outside app\/views/);
+		});
+
+		it('should say a translation file is read rather than answered for', async () => {
+			const { registry, root } = await withAlloy();
+			const routed = await route(registry, path.join(root, 'app', 'i18n', 'en', 'strings.xml'), 'json');
+
+			assert.equal(routed?.role, 'i18n');
+			assert.match(await noRoleReason(routed), /translation file/);
+		});
+
+		it('should name the kind and the role for anything else', async () => {
+			const { registry, root } = await withAlloy();
+			const routed = await route(registry, path.join(root, 'app', 'assets', 'logo.png'), 'png');
+
+			const reason = await noRoleReason(routed!);
+
+			assert.match(reason, /no language the server recognises/, 'a png is not a language it has an id for');
+			assert.match(reason, /role "unknown"/, 'should name the role rather than say nothing');
+			assert.match(reason, /an Alloy project/);
+		});
+
+		it('should name the language rather than its id', async () => {
+			// "a xml file" reads as a typo, and these lines are read by people
+			const { registry, root } = await withAlloy();
+			const routed = await route(registry, path.join(root, 'app', 'lib', 'stray.xml'), 'xml');
+
+			const reason = await noRoleReason(routed!);
+
+			assert.match(reason, /is XML with the role "lib"/, reason);
+		});
+
+		it('should name a classic project as one for anything else', async () => {
+			const registry = new ProjectRegistry();
+			const root = await fixturePath('classic-project');
+			await registry.add([ root ]);
+			const routed = await route(registry, path.join(root, 'build', 'something.png'), 'png');
+
+			assert.match(await noRoleReason(routed!), /a classic project/);
 		});
 	});
 

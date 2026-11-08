@@ -155,6 +155,93 @@ export function isTiapp (filePath: string): boolean {
 }
 
 /**
+ * Why a document that routed nowhere routed nowhere, in words someone can act on.
+ *
+ * Every handler answers nothing for a file it cannot place, and the protocol gives a client no way
+ * to carry a reason with an empty answer — LSP tracing shows the empty response and never why — so
+ * this is what a log line is written from. The cases are told apart rather than collapsed into one
+ * message, because the thing to do about each differs: open the project's folder, move the file,
+ * or look at the tiapp.xml.
+ *
+ * @param registry - The registered projects
+ * @param filePath - The document the request named
+ * @param roots - The folders the client opened
+ * @returns {string} Why nothing could be answered
+ */
+export function noProjectReason (registry: ProjectRegistry, filePath: string, roots: string[]): string {
+	const root = roots.find(candidate => contains(candidate, filePath));
+	if (!root) {
+		return 'it is not inside any folder the editor opened, so no Titanium project was ever looked for around it';
+	}
+
+	const registered = registry.projects.filter(project => contains(root, project.filePath));
+	if (!registered.length) {
+		// the likeliest case by far, and the one hardest to guess at: the scan depth is deliberate,
+		// so the answer is to open the project's own folder rather than its parent
+		return `No Titanium project is registered under ${root}. One is looked for in that folder and in each folder directly inside it, and only a directory with a tiapp.xml that has an sdk-version counts as one`;
+	}
+
+	return `it is not inside any of the projects registered under ${root} (${registered.map(project => project.filePath).join(', ')})`;
+}
+
+/**
+ * Why a routed file is not something the view, stylesheet or script handlers can answer for.
+ *
+ * The role is what the layout made of the file, so this says what about the layout stopped it:
+ * an Alloy file in a classic project, or a file in a directory that gives it no role.
+ *
+ * The role is read before the kind, because a file whose role the layout did name is in the right
+ * place by definition. `app/i18n/en/strings.xml` is a `.xml` the layout calls a translation, and
+ * telling its author it is a view in the wrong directory would send them to move a correct file.
+ *
+ * @param routed - The routed file
+ * @returns {Promise<string>} Why nothing could be answered
+ */
+export async function noRoleReason (routed: RoutedFile): Promise<string> {
+	const alloy = await routed.project.type() === 'alloy';
+
+	if (routed.role === 'i18n') {
+		return 'it is a translation file, which is read when a key is looked up rather than answered for directly';
+	}
+
+	// the two kinds that are Alloy's and nothing else's, with where Alloy reads each from
+	const expected: Partial<Record<FileKind, string>> = { tss: 'app/styles', xml: 'app/views' };
+	const where = expected[routed.kind];
+
+	if (where && !alloy) {
+		return `${routed.project.filePath} is a classic project, so a ${path.extname(routed.path)} file there has no Alloy role — stylesheets and views are Alloy's, and a classic project has neither`;
+	}
+
+	if (where && routed.role === 'unknown') {
+		const directory = where.slice('app/'.length);
+		return `it is a ${routed.kind === 'tss' ? 'stylesheet' : 'view'} outside ${where}, which is where Alloy reads them from (a widget's under app/widgets/<name>/${directory}, a theme's under app/themes/<name>/${directory})`;
+	}
+
+	return `the file is ${readable[routed.kind]} with the role "${routed.role}", and nothing is answered for that in ${alloy ? 'an Alloy' : 'a classic'} project`;
+}
+
+/** What to call each kind in a message, where the id itself would read as a typo */
+const readable: Record<FileKind, string> = {
+	xml: 'XML',
+	tss: 'TSS',
+	javascript: 'JavaScript',
+	typescript: 'TypeScript',
+	unknown: 'of no language the server recognises'
+};
+
+/**
+ * Whether a file sits at or below a directory
+ *
+ * @param directory - The directory
+ * @param filePath - The file
+ * @returns {boolean} Whether it is inside
+ */
+function contains (directory: string, filePath: string): boolean {
+	const relative = path.relative(directory, filePath);
+	return !relative.startsWith('..') && !path.isAbsolute(relative);
+}
+
+/**
  * Routes a document to the project it belongs to and what it is there.
  *
  * A file in no registered project is not routed at all, rather than routed to a project that

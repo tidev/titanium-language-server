@@ -17,7 +17,7 @@ import { AcquiredTypes, ProjectTypes, SdkTypes } from '../core/typescript/types.
 import type { TypesSource } from '../core/typescript/types.ts';
 import { NpmAcquirer } from '../core/typescript/acquire.ts';
 import { typesCoverSdk } from '../core/typescript/versions.ts';
-import { isTiapp, route } from '../core/routing.ts';
+import { isTiapp, noProjectReason, noRoleReason, route } from '../core/routing.ts';
 import { styleCompletionsAt } from '../core/style.ts';
 import { tiappCompletionsAt } from '../core/tiapp.ts';
 import type { InstalledSource } from '../core/tiapp.ts';
@@ -89,6 +89,14 @@ export class TiLanguageService {
 	private diagnosed = new Set<string>();
 	/** The projects already told their types are too old to warn from, so it is said once */
 	private explained = new Set<string>();
+	/**
+	 * Why each document was last answered nothing.
+	 *
+	 * These handlers run on every keystroke, so the reason is logged only when it changes. An
+	 * identical line per request would bury everything else in the log, which is the state this
+	 * was added to fix rather than one to swap for another.
+	 */
+	private dropped = new Map<string, string>();
 
 	/**
 	 * @param connection - The connection to serve on
@@ -130,6 +138,9 @@ export class TiLanguageService {
 		});
 		this.documents.onDidClose(closed => {
 			this.cache.forget(toPath(closed.document.uri));
+			// a document opened again is worth explaining again, and nothing should grow without
+			// bound for the life of the server
+			this.dropped.delete(toPath(closed.document.uri));
 			this.clearDiagnostics(closed.document.uri);
 			// the file reads as it was saved again, which can change what its neighbours get wrong
 			this.scheduleDiagnostics();
@@ -309,7 +320,7 @@ export class TiLanguageService {
 			const view = routed?.kind === 'xml' && routed.role === 'view';
 			const style = routed?.kind === 'tss' && routed.role === 'style';
 			if (!routed || (!view && !style)) {
-				return null;
+				return this.dropUnrouted(params.textDocument.uri, routed);
 			}
 
 			const source = await this.cache.read(routed.path);
@@ -615,7 +626,7 @@ export class TiLanguageService {
 
 			const script = await this.scriptFor(routed);
 			if (!script) {
-				return null;
+				return this.dropUnrouted(params.textDocument.uri, routed);
 			}
 
 			const offset = offsetAt(script.text, params.position);
@@ -659,7 +670,7 @@ export class TiLanguageService {
 	private async viewCompletions (project: Project, filePath: string, position: vls.Position): Promise<vls.CompletionItem[]|null> {
 		const service = this.services.get(project);
 		if (!service) {
-			return null;
+			return this.drop(toUri(filePath), `no language service has been built for ${project.filePath} yet, so nothing can be answered from its types`);
 		}
 
 		// the buffer when the document is open, which is what makes the answer current rather than
@@ -698,7 +709,7 @@ export class TiLanguageService {
 	private async styleCompletions (project: Project, filePath: string, position: vls.Position): Promise<vls.CompletionItem[]|null> {
 		const service = this.services.get(project);
 		if (!service) {
-			return null;
+			return this.drop(toUri(filePath), `no language service has been built for ${project.filePath} yet, so nothing can be answered from its types`);
 		}
 
 		const style = await this.cache.read(filePath);
@@ -842,11 +853,12 @@ export class TiLanguageService {
 
 			const script = await this.scriptFor(routed);
 			if (!script) {
-				return null;
+				return this.dropUnrouted(params.textDocument.uri, routed);
 			}
 
 			const info = script.service.quickInfoAt(script.path, offsetAt(script.text, params.position));
 			if (!info) {
+				// a position with nothing under it is not a request that went astray
 				return null;
 			}
 
@@ -876,7 +888,7 @@ export class TiLanguageService {
 	private async viewHover (project: Project, filePath: string, position: vls.Position): Promise<vls.Hover|null> {
 		const service = this.services.get(project);
 		if (!service) {
-			return null;
+			return this.drop(toUri(filePath), `no language service has been built for ${project.filePath} yet, so nothing can be answered from its types`);
 		}
 
 		const view = await this.cache.read(filePath);
@@ -908,7 +920,7 @@ export class TiLanguageService {
 	private async styleHover (project: Project, filePath: string, position: vls.Position): Promise<vls.Hover|null> {
 		const service = this.services.get(project);
 		if (!service) {
-			return null;
+			return this.drop(toUri(filePath), `no language service has been built for ${project.filePath} yet, so nothing can be answered from its types`);
 		}
 
 		const style = await this.cache.read(filePath);
@@ -943,6 +955,42 @@ export class TiLanguageService {
 		// the language id says what the file is written in and the layout says what it does there;
 		// a document the client never opened has no id, and the extension answers instead
 		return route(this.registry, toPath(uri), this.documents.get(uri)?.languageId ?? '');
+	}
+
+	/**
+	 * Logs why a request was answered nothing, and answers nothing.
+	 *
+	 * Written once per document for as long as the reason is the same: a handler of this shape runs
+	 * on every keystroke, and the whole point is a log someone can read. Returns null so a handler
+	 * can say why and answer in one statement.
+	 *
+	 * @param uri - The document the request named
+	 * @param reason - Why nothing could be answered, in words someone can act on
+	 * @returns {null} Nothing, which is what the handler answers
+	 */
+	private drop (uri: string, reason: string): null {
+		const filePath = toPath(uri);
+
+		if (this.dropped.get(filePath) !== reason) {
+			logger.log(`No answer for ${filePath}: ${reason}`);
+			this.dropped.set(filePath, reason);
+		}
+
+		return null;
+	}
+
+	/**
+	 * Why a routed file is not something the handlers can answer for, which is either the project
+	 * it is in or the role its place in that project gave it
+	 *
+	 * @param uri - The document the request named
+	 * @param routed - What it routed to, when it routed anywhere
+	 * @returns {Promise<null>} Nothing, having said why
+	 */
+	private async dropUnrouted (uri: string, routed: RoutedFile|undefined): Promise<null> {
+		return this.drop(uri, routed
+			? await noRoleReason(routed)
+			: noProjectReason(this.registry, toPath(uri), this.roots));
 	}
 
 	/**
