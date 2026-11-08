@@ -13,7 +13,7 @@ import { SourceCache } from '../core/references.ts';
 import { Project } from '../core/project.ts';
 import { ProjectRegistry } from '../core/registry.ts';
 import { ProjectServices } from '../core/typescript/services.ts';
-import { AcquiredTypes, ProjectTypes } from '../core/typescript/types.ts';
+import { AcquiredTypes, ProjectTypes, SdkTypes } from '../core/typescript/types.ts';
 import type { TypesSource } from '../core/typescript/types.ts';
 import { NpmAcquirer } from '../core/typescript/acquire.ts';
 import { typesCoverSdk } from '../core/typescript/versions.ts';
@@ -93,14 +93,15 @@ export class TiLanguageService {
 	/**
 	 * @param connection - The connection to serve on
 	 * @param typesSources - Where `@types/titanium` comes from, in preference order. Defaults to
-	 *   the project's own copy, then npm. A test supplies its own rather than reaching the network.
+	 *   the project's own copy, then the declarations its SDK ships, then npm. A test supplies its
+	 *   own rather than reaching the network.
 	 * @param titanium - What is installed on the machine. Defaults to asking the Titanium CLI; a
 	 *   test supplies its own rather than reading whatever the machine running it has installed.
 	 * @param delay - How long after an edit the open documents are checked, in milliseconds
 	 */
 	constructor (
 		connection = vls.createConnection(vls.ProposedFeatures.all),
-		typesSources: TypesSource[] = [ new ProjectTypes(), new AcquiredTypes(new NpmAcquirer()) ],
+		typesSources: TypesSource[] = [ new ProjectTypes(), new SdkTypes(), new AcquiredTypes(new NpmAcquirer()) ],
 		titanium: InstalledSource = new TitaniumCli(),
 		delay = DIAGNOSTIC_DELAY
 	) {

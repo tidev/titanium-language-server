@@ -4,8 +4,9 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { Project } from '../../../core/project.ts';
-import { AcquiredTypes, ProjectTypes, resolveTypes } from '../../../core/typescript/types.ts';
+import { AcquiredTypes, ProjectTypes, SdkTypes, resolveTypes } from '../../../core/typescript/types.ts';
 import type { TypesAcquirer } from '../../../core/typescript/acquire.ts';
+import { mobileSdkHost } from '../../../core/titanium.ts';
 import { fixturePath } from '../../fixtures.ts';
 
 /**
@@ -198,6 +199,25 @@ describe('Resolving @types/titanium', () => {
 			assert.match(resolved?.report.message ?? '', /last asked/, 'should say when npm was last asked, so the user can see why');
 		});
 
+		it('should say how long ago npm was asked, in the roundest terms that are true', async () => {
+			// the point is to show the answer is current, not to be precise about it
+			const cases: [ number, RegExp ][] = [
+				[ 0, /just now/ ],
+				[ 60 * 1000, /1 minute ago/ ],
+				[ 7 * 60 * 1000, /7 minutes ago/ ],
+				[ 60 * 60 * 1000, /1 hour ago/ ],
+				[ 5 * 60 * 60 * 1000, /5 hours ago/ ]
+			];
+
+			for (const [ ago, expected ] of cases) {
+				const { acquirer } = fakeAcquirer(published, [ '12.0.8' ], Date.now() - ago);
+
+				const resolved = await new AcquiredTypes(acquirer).locate(await project('classic-project'));
+
+				assert.match(resolved?.report.message ?? '', expected, `${ago}ms ago`);
+			}
+		});
+
 		it('should ask npm again once the cache has gone stale', async () => {
 			// a staleness window rather than a machine pinned forever to whatever it fetched first
 			const { acquirer, installed, asked } = fakeAcquirer(published, [ '12.0.2' ], longAgo());
@@ -280,6 +300,94 @@ describe('Resolving @types/titanium', () => {
 		});
 	});
 
+	describe('types shipped in the SDK', () => {
+		/**
+		 * A source reading the fixture install location rather than the machine's
+		 *
+		 * @returns {Promise<SdkTypes>} The source
+		 */
+		async function fromTheSdk (): Promise<SdkTypes> {
+			return new SdkTypes([ await fixturePath('titanium-sdk-home') ]);
+		}
+
+		it('should find the declarations the SDK ships', async () => {
+			// classic-project is on 12.4.0.GA, and the fixture install location has a 12.4.0.GA
+			// carrying types/
+			const resolved = await (await fromTheSdk()).locate(await project('classic-project'));
+
+			assert.ok(resolved?.location, 'expected the SDK\'s own declarations to be found');
+			assert.ok(resolved.location.entry.endsWith('index.d.ts'));
+			assert.ok(resolved.location.packagePath.endsWith(path.join('12.4.0.GA', 'types')), resolved.location.packagePath);
+		});
+
+		it('should read the version from the declarations\' own manifest', async () => {
+			// not from the SDK's root package.json, which is titanium_mobile's and has no types
+			// field at all — reading that would report the SDK's version as the types version
+			const resolved = await (await fromTheSdk()).locate(await project('classic-project'));
+
+			assert.equal(resolved?.location?.version, '12.4.0');
+		});
+
+		it('should say which SDK the types came from', async () => {
+			const resolved = await (await fromTheSdk()).locate(await project('classic-project'));
+
+			assert.equal(resolved?.report.level, 'info', 'the SDK\'s own types match it by construction');
+			assert.match(resolved.report.message, /12\.4\.0\.GA/, 'should name the SDK it read them from');
+			assert.match(resolved.report.message, /Titanium SDK/);
+		});
+
+		it('should find nothing when the SDK ships none, which is every SDK so far', async () => {
+			// alloy-matched-project is on 9.3.2.GA, which the fixture has installed without types
+			assert.equal(await (await fromTheSdk()).locate(await project('alloy-matched-project')), undefined);
+		});
+
+		it('should find nothing when the types directory holds no entry', async () => {
+			// alloy-project is on 10.1.0.GA, whose types/ was only partly written
+			assert.equal(await (await fromTheSdk()).locate(await project('alloy-project')), undefined);
+		});
+
+		it('should find nothing when the SDK is not installed at all', async () => {
+			// alloy-typed-project is on 12.4.0.GA, so the fixture answers for it; an install
+			// location with nothing in it must not
+			const empty = new SdkTypes([ await fixturePath('not-a-project') ]);
+
+			assert.equal(await empty.locate(await project('alloy-typed-project')), undefined);
+		});
+
+		it('should take the first install location that has it', async () => {
+			const found = new SdkTypes([ await fixturePath('not-a-project'), await fixturePath('titanium-sdk-home') ]);
+
+			assert.ok((await found.locate(await project('classic-project')))?.location);
+		});
+
+		it('should say so rather than guess when the declarations carry no version', async () => {
+			// a manifest without a version still names a usable entry, so the types are used and
+			// the report says what it does not know
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), 'ti-ls-sdk-'));
+			const types = path.join(root, 'mobilesdk', mobileSdkHost(), '12.4.0.GA', 'types');
+			await fs.mkdir(types, { recursive: true });
+			await fs.writeFile(path.join(types, 'index.d.ts'), 'declare const Ti: unknown;');
+
+			const resolved = await new SdkTypes([ root ]).locate(await project('classic-project'));
+
+			assert.ok(resolved?.location);
+			assert.equal(resolved.location.version, undefined);
+			assert.match(resolved.report.message, /of unknown version/);
+			assert.match(resolved.report.message, /12\.4\.0\.GA/, 'should still name the SDK');
+		});
+
+		it('should find nothing for a project with no sdk-version', async () => {
+			// the registry turns such a project away, but the source must not throw if it is asked
+			assert.equal(await (await fromTheSdk()).locate(await project('no-sdk-project')), undefined);
+		});
+
+		it('should default to this machine\'s install locations', async () => {
+			// nothing ships these types yet, so on a real machine this resolves nothing — what is
+			// under test is that asking costs nothing and throws nothing
+			assert.doesNotReject(async () => new SdkTypes().locate(await project('classic-project')));
+		});
+	});
+
 	describe('resolution order', () => {
 		it('should prefer the project\'s own types over acquiring', async () => {
 			const { acquirer, installed } = fakeAcquirer();
@@ -296,6 +404,41 @@ describe('Resolving @types/titanium', () => {
 			const resolved = await resolveTypes(await project('alloy-project'), [ new ProjectTypes(), new AcquiredTypes(acquirer) ]);
 
 			assert.ok(resolved.location);
+			assert.deepEqual(installed, [ '9.2.2' ]);
+		});
+
+		it('should prefer the project\'s own copy over the SDK\'s', async () => {
+			// the project compiles against its own node_modules, so that is the program the editor
+			// must describe — whatever the SDK beside it ships
+			const sdk = new SdkTypes([ await fixturePath('titanium-sdk-home') ]);
+
+			const resolved = await resolveTypes(await project('classic-project'), [ new ProjectTypes(), sdk, new AcquiredTypes(fakeAcquirer().acquirer) ]);
+
+			assert.equal(resolved.location?.source, 'the project');
+			assert.equal(resolved.location?.version, '9.2.2');
+		});
+
+		it('should prefer the SDK\'s types over acquiring from npm', async () => {
+			// the SDK's own declarations describe exactly the SDK being built against, and cost a
+			// stat rather than an npm spawn
+			const sdk = new SdkTypes([ await fixturePath('titanium-sdk-home') ]);
+			const { acquirer, installed } = fakeAcquirer();
+
+			const resolved = await resolveTypes(await project('classic-untyped-project'), [ new ProjectTypes(), sdk, new AcquiredTypes(acquirer) ]);
+
+			assert.equal(resolved.location?.source, 'the Titanium SDK');
+			assert.deepEqual(installed, [], 'npm should not have been reached for at all');
+		});
+
+		it('should fall through to npm for an SDK that ships no types', async () => {
+			// every SDK released so far, which is why npm stays the fallback rather than being
+			// replaced
+			const sdk = new SdkTypes([ await fixturePath('titanium-sdk-home') ]);
+			const { acquirer, installed } = fakeAcquirer();
+
+			const resolved = await resolveTypes(await project('alloy-project'), [ new ProjectTypes(), sdk, new AcquiredTypes(acquirer) ]);
+
+			assert.equal(resolved.location?.source, 'npm');
 			assert.deepEqual(installed, [ '9.2.2' ]);
 		});
 

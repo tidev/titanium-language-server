@@ -2,7 +2,7 @@ import { describe, it, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
-import { TitaniumCli } from '../../core/titanium.ts';
+import { TitaniumCli, mobileSdkHost, sdkDirectories, sdkInstallLocations } from '../../core/titanium.ts';
 import type { CommandResult, CommandRunner } from '../../core/command.ts';
 import { logger } from '../../logger.ts';
 
@@ -204,5 +204,69 @@ describe('The Titanium CLI', () => {
 
 			assert.deepEqual((await cli.installed()).sdks.map(found => found.version), [ '13.0.0.GA' ]);
 		});
+	});
+});
+
+describe('Where SDKs are installed', () => {
+
+	it('should name the mobilesdk host directory the way the CLI does', () => {
+		// `mobilesdk/<host>` is the CLI's own `process.platform === 'darwin' ? 'osx' : platform`,
+		// so darwin is the one that differs from Node's name for it
+		assert.equal(mobileSdkHost('darwin'), 'osx');
+		assert.equal(mobileSdkHost('linux'), 'linux');
+		assert.equal(mobileSdkHost('win32'), 'win32');
+	});
+
+	it('should treat an unsupported platform as linux, which is what its layout looks like', () => {
+		assert.equal(mobileSdkHost('freebsd'), 'linux');
+	});
+
+	it('should look under the home directory and the machine on macOS, in that order', () => {
+		// the CLI prefers the user's own install over the shared one, and so must this
+		const locations = sdkInstallLocations('darwin', {}, '/Users/me');
+
+		assert.deepEqual(locations, [
+			path.join('/Users/me', 'Library', 'Application Support', 'Titanium'),
+			path.join('/', 'Library', 'Application Support', 'Titanium')
+		]);
+	});
+
+	it('should look under ~/.titanium on Linux', () => {
+		assert.deepEqual(sdkInstallLocations('linux', {}, '/home/me'), [ path.join('/home/me', '.titanium') ]);
+	});
+
+	it('should read the Windows locations from the environment, as the CLI expands them', () => {
+		const locations = sdkInstallLocations('win32', { ProgramData: 'C:\\ProgramData', APPDATA: 'C:\\Users\\me\\AppData\\Roaming' }, 'C:\\Users\\me');
+
+		assert.deepEqual(locations, [
+			path.join('C:\\ProgramData', 'Titanium'),
+			path.join('C:\\Users\\me\\AppData\\Roaming', 'Titanium')
+		]);
+	});
+
+	it('should leave out a Windows location the environment does not set', () => {
+		// a variable that is not set must not become a relative path rooted at the server's cwd
+		assert.deepEqual(sdkInstallLocations('win32', { ProgramData: 'C:\\ProgramData' }, 'C:\\Users\\me'), [ path.join('C:\\ProgramData', 'Titanium') ]);
+	});
+
+	it('should answer where a version would be installed, under each location', () => {
+		const directories = sdkDirectories('12.4.0.GA', 'linux', {}, '/home/me');
+
+		assert.deepEqual(directories, [ path.join('/home/me', '.titanium', 'mobilesdk', 'linux', '12.4.0.GA') ]);
+	});
+
+	it('should not read the machine when it is given a version that is not one', () => {
+		// a tiapp with a blank or junk sdk-version must not turn into a path into the SDK root
+		assert.deepEqual(sdkDirectories('', 'linux', {}, '/home/me'), []);
+		assert.deepEqual(sdkDirectories('../../etc', 'linux', {}, '/home/me'), []);
+		assert.deepEqual(sdkDirectories('13.2.0.GA/..', 'linux', {}, '/home/me'), []);
+	});
+
+	it('should default to this machine, so a caller need not know the platform', () => {
+		const directories = sdkDirectories('12.4.0.GA');
+
+		assert.ok(directories.length, 'every supported platform has at least one location');
+		assert.ok(directories.every(directory => path.isAbsolute(directory)));
+		assert.ok(directories.every(directory => directory.endsWith(path.join('mobilesdk', mobileSdkHost(), '12.4.0.GA'))));
 	});
 });
