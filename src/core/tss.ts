@@ -107,9 +107,27 @@ export interface TssDiagnostic {
 	range: TssRange;
 }
 
+/**
+ * A comment, which the parser otherwise discards as trivia.
+ *
+ * Recorded because a position inside one is held by no rule, and so is indistinguishable from the
+ * top level unless the parse says so. Working it out from the text afterwards would mean
+ * re-implementing the string handling that keeps `"http://x"` from reading as a comment.
+ */
+export interface TssComment {
+	range: TssRange;
+	/**
+	 * Whether the comment carries its own end. A block comment's `*` + `/` is part of it, so a
+	 * cursor past that is outside; a line comment ends at a newline that is not part of it, so a
+	 * cursor at its end is still inside.
+	 */
+	terminated: boolean;
+}
+
 export interface TssDocument {
 	rules: TssRule[];
 	diagnostics: TssDiagnostic[];
+	comments: TssComment[];
 }
 
 /** What sits at an offset, which is what a provider asks before deciding what to offer */
@@ -170,6 +188,7 @@ class TssParser {
 
 	private readonly rules: TssRule[] = [];
 	private readonly diagnostics: TssDiagnostic[] = [];
+	private readonly comments: TssComment[] = [];
 
 	private readonly text: string;
 	private readonly dedentClosesBlocks: boolean;
@@ -199,7 +218,7 @@ class TssParser {
 			}
 		}
 
-		return { rules: this.rules, diagnostics: this.diagnostics };
+		return { rules: this.rules, diagnostics: this.diagnostics, comments: this.comments };
 	}
 
 	private parseRule (): void {
@@ -651,15 +670,20 @@ class TssParser {
 			}
 
 			if (this.text.startsWith('//', this.offset)) {
+				const start = this.offset;
 				while (!this.atEnd() && this.text[this.offset] !== '\n') {
 					this.offset++;
 				}
+				// the newline is not part of it, so a cursor at the end of the text is still inside
+				this.comments.push({ range: { start, end: this.offset }, terminated: false });
 				continue;
 			}
 
 			if (this.text.startsWith('/*', this.offset)) {
+				const start = this.offset;
 				const end = this.text.indexOf('*/', this.offset + 2);
 				this.offset = end === -1 ? this.text.length : end + 2;
+				this.comments.push({ range: { start, end: this.offset }, terminated: end !== -1 });
 				continue;
 			}
 
@@ -800,6 +824,26 @@ export function nodeAt (document: TssDocument, offset: number): TssNodeAt|undefi
 
 		return { kind: 'body', rule, path: [], siblings: rule.properties };
 	}
+}
+
+/**
+ * Whether an offset sits inside a comment.
+ *
+ * Asked alongside `nodeAt`, which answers nothing both at the top level and inside a comment: the
+ * two are the same absence and want opposite answers.
+ *
+ * The start is exclusive, so a cursor immediately before a `//` is at the top level rather than in
+ * the comment it precedes. The end follows the comment's own: a block comment's `*` + `/` belongs
+ * to it, so a cursor past that is out, while a line comment's newline does not, so a cursor at the
+ * end of the line is still in.
+ *
+ * @param document - The parsed stylesheet
+ * @param offset - A character offset into the source
+ * @returns {boolean} Whether it is inside a comment
+ */
+export function insideComment (document: TssDocument, offset: number): boolean {
+	return document.comments.some(comment => offset > comment.range.start
+		&& (comment.terminated ? offset < comment.range.end : offset <= comment.range.end));
 }
 
 /**

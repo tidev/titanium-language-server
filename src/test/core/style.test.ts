@@ -142,6 +142,31 @@ describe('What can be written in a stylesheet', () => {
 			assert.ok((await labelsAt('|".a": {\n\tcolor: "red"\n}\n')).includes('Label'));
 		});
 
+		it('should offer nothing inside a line comment', async () => {
+			// a comment is trivia, so no rule holds the cursor there either — but accepting a whole
+			// rule would comment out its own opening and leave the closing brace behind, which is
+			// TSS Alloy will not parse
+			assert.deepEqual(await labelsAt('".a": {}\n// |'), []);
+			assert.deepEqual(await labelsAt('".a": {}\n// note | here'), []);
+		});
+
+		it('should offer nothing inside a block comment', async () => {
+			assert.deepEqual(await labelsAt('".a": {}\n/* | */'), []);
+			assert.deepEqual(await labelsAt('".a": {}\n/* unterminated |'), []);
+		});
+
+		it('should offer selectors again after a comment has ended', async () => {
+			assert.ok((await labelsAt('".a": {}\n// note\n|')).includes('Label'), 'the line after a line comment');
+			assert.ok((await labelsAt('".a": {}\n/* note */ |')).includes('Label'), 'after a block comment closes');
+			assert.ok((await labelsAt('|// note')).includes('Label'), 'before a comment begins');
+		});
+
+		it('should offer properties inside a rule that holds a comment', async () => {
+			// the comment check must only guard the top level: a comment inside a body is held by
+			// the rule, so nothing about it reaches the new path
+			assert.ok((await labelsAt('"Label": {\n\t// note\n\t|\n}')).includes('color'));
+		});
+
 		it('should insert a whole rule where there is no rule to complete into', async () => {
 			// at top level there is no `"…": {}` around the cursor, so accepting a name has to
 			// write one — otherwise the user is left with a bare word that Alloy will not parse
@@ -151,6 +176,34 @@ describe('What can be written in a stylesheet', () => {
 			assert.match(top?.insert?.plain ?? '', /^"Label": \{/, `got ${top?.insert?.plain}`);
 			assert.match(top?.insert?.snippet ?? '', /^"Label": \{/);
 			assert.equal(inside?.insert, undefined, 'inside a selector the name alone is right');
+		});
+
+		it('should write the whole rule in the quote the stylesheet uses', async () => {
+			const single = (await completionsAt("'.a': {}\n\n|")).find(completion => completion.label === 'Label');
+
+			assert.match(single?.insert?.plain ?? '', /^'Label': \{/, `got ${single?.insert?.plain}`);
+		});
+
+		it('should escape a selector that would otherwise break the rule it writes', async () => {
+			// a class carrying an apostrophe, in a stylesheet written with single quotes
+			const view = '<Alloy><Window class="it\'s"/></Alloy>';
+			const entry = (await completionsAt("'.a': {}\n\n|", { view })).find(completion => completion.label === ".it's");
+
+			assert.ok(entry, 'expected the class from the view to be offered');
+			assert.match(entry.insert?.plain ?? '', /^'\.it\\'s': \{/, `got ${entry.insert?.plain}`);
+		});
+
+		it('should not let a selector be read as a snippet placeholder', async () => {
+			// `$1` in a class name would be a tab stop, so the name would vanish from what is
+			// inserted and the cursor would land where the class should be
+			const view = '<Alloy><Window class="amount$1"/></Alloy>';
+			const entry = (await completionsAt('".a": {}\n\n|', { view })).find(completion => completion.label === '.amount$1');
+
+			assert.ok(entry, 'expected the class from the view to be offered');
+			assert.ok(entry.insert?.snippet.startsWith('"\\.amount\\$1": {') || entry.insert?.snippet.startsWith('".amount\\$1": {'),
+				`the name must survive as text, got ${entry.insert?.snippet}`);
+			assert.match(entry.insert?.snippet ?? '', /\$0/, 'the body placeholder is the one that stays live');
+			assert.equal(entry.insert?.plain, '".amount$1": {\n\t\n}', 'the plain form takes no escaping');
 		});
 
 		it('should replace nothing but the cursor when it writes a whole rule', async () => {

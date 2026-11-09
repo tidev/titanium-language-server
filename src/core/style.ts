@@ -1,4 +1,4 @@
-import { quoteOf } from './actions.ts';
+import { literal, quoteOf } from './actions.ts';
 import { imagePathsFor, isImageProperty } from './assets.ts';
 import { styledElements, styles } from './cascade.ts';
 import { readAlloyConfig } from './config.ts';
@@ -8,7 +8,7 @@ import { ReferenceIndex } from './references.ts';
 import type { SourceCache, SourceFile } from './references.ts';
 import { viewsStyledBy } from './related.ts';
 import { alloyTags, titaniumTypeOf } from './tags.ts';
-import { keyIndexAt, nodeAt, parseSelector, parseTss, sourceRange } from './tss.ts';
+import { insideComment, keyIndexAt, nodeAt, parseSelector, parseTss, sourceRange } from './tss.ts';
 import type { TssProperty, TssRange, TssRule } from './tss.ts';
 import type { ApiMember } from './typescript/host.ts';
 import { named, translationsIn } from './view.ts';
@@ -57,14 +57,18 @@ export async function styleCompletionsAt (context: StyleCompletionContext): Prom
 		return [];
 	}
 
-	const at = nodeAt(parseTss(context.style.text), context.offset);
+	const document = parseTss(context.style.text);
+	const at = nodeAt(document, context.offset);
 
 	// no rule holds the cursor, so it is at the top level: between two rules, above the first,
 	// below the last, or in a stylesheet with nothing in it yet. A selector is the only thing
 	// that can be written there, and standing on the blank line between two rules and asking is
-	// the obvious way to start writing a new one
+	// the obvious way to start writing a new one.
+	//
+	// A comment is the other place no rule holds, and it wants the opposite answer: accepting a
+	// whole rule inside one would comment out its own opening and leave the closing brace behind
 	if (!at) {
-		return selectorCompletions(context);
+		return insideComment(document, context.offset) ? [] : selectorCompletions(context);
 	}
 
 	if (at.kind === 'selector') {
@@ -122,25 +126,54 @@ async function selectorCompletions (context: StyleCompletionContext, rule?: TssR
 		...named(distinct('id').map(name => `#${name}`), 'property', range)
 	];
 
-	return rule ? entries : entries.map(entry => ({ ...entry, insert: wholeRule(entry.label, context.style.text) }));
+	if (rule) {
+		return entries;
+	}
+
+	// read once rather than per entry: `quoteOf` parses the whole stylesheet, and there are as
+	// many entries here as the project has tags, classes and ids
+	const quote = quoteOf(context.style.text);
+	return entries.map(entry => ({ ...entry, insert: wholeRule(entry.label, quote) }));
 }
 
 /**
  * A selector as the whole rule it needs to become, in the quote the stylesheet already uses.
  *
- * The snippet leaves the cursor in the body, which is where the next thing written goes. A client
- * with no snippet engine gets the same text without it — `named` is what picks between the two.
+ * The name is written as a TSS literal, because a class or an id comes from a view and can carry
+ * anything an XML attribute can — an apostrophe in a stylesheet written with single quotes would
+ * otherwise end the key early. The snippet form escapes the literal's `$` and `}` as well: they
+ * are the snippet syntax's own, so a class named `amount$1` would lose its `$1` to a tab stop and
+ * insert the cursor where the name should be.
+ *
+ * The body's `$0` is the one placeholder left live, which is where the next thing written goes. A
+ * client with no snippet engine gets the plain form, which needs no snippet escaping —
+ * `toViewItem` is what picks between the two.
  *
  * @param selector - The selector name
- * @param text - The stylesheet, to read which quote it writes
+ * @param quote - The quote the stylesheet writes its keys in
  * @returns The two forms of the insertion
  */
-function wholeRule (selector: string, text: string): { snippet: string; plain: string } {
-	const quote = quoteOf(text);
+function wholeRule (selector: string, quote: string): { snippet: string; plain: string } {
+	const key = literal(selector, quote);
+
 	return {
-		snippet: `${quote}${selector}${quote}: {\n\t$0\n}`,
-		plain: `${quote}${selector}${quote}: {\n\t\n}`
+		snippet: `${snippetSafe(key)}: {\n\t$0\n}`,
+		plain: `${key}: {\n\t\n}`
 	};
+}
+
+/**
+ * Text that a snippet engine will insert as it stands.
+ *
+ * `$`, `}` and `\` are the snippet syntax's own, and a client is required to read them as such
+ * wherever they appear in an insertion. Escaped here rather than left to the client, which has no
+ * way to tell a class named `amount$1` from a tab stop someone meant.
+ *
+ * @param text - The text to insert literally
+ * @returns {string} The same text, escaped for a snippet
+ */
+function snippetSafe (text: string): string {
+	return text.replaceAll('\\', '\\\\').replaceAll(/[$}]/g, character => `\\${character}`);
 }
 
 /**
