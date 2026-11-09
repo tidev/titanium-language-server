@@ -22,6 +22,10 @@ import { logger } from '../../logger.ts';
  * is what avoids hand-rolling a tar reader, and it inherits the user's own registry and proxy
  * configuration, which is usually the difference between working and not behind a corporate proxy.
  *
+ * Spawning it is also the expensive part — around 280ms a run, paid once per project in the
+ * workspace — so what the registry answered, and when, is recorded beside the versions it named,
+ * and `AcquiredTypes` reads that to decide whether it has to be asked again at all.
+ *
  * Nothing here throws. A machine with no network, or no npm, is a normal condition for a language
  * server rather than an error — the resolver falls through to reporting that nothing resolved.
  */
@@ -32,11 +36,36 @@ const packageName = '@types/titanium';
 /** The environment variable that moves the cache */
 const CACHE_VARIABLE = 'TITANIUM_LANGUAGE_SERVER_TYPES_CACHE';
 
+/**
+ * The file in the cache root holding the registry's last answer.
+ *
+ * A dotfile so a user reading the cache sees versions and one piece of bookkeeping rather than
+ * two kinds of thing, and a file rather than a directory so `cached` skips it without having to
+ * know its name. Exported so a test names the same file this does.
+ */
+export const LISTING_FILE = '.last-registry-listing.json';
+
+/** What the registry last said was published here, and when it said it */
+export interface RegistryListing {
+	/** When the registry answered, in milliseconds since the epoch */
+	at: number;
+	/** Every version it named */
+	versions: string[];
+}
+
 export interface TypesAcquirer {
 	/** Every version published, or nothing when the registry cannot be reached */
 	versions (): Promise<string[]>;
 	/** Every version already fetched, which is what there is to choose from offline */
 	cached (): Promise<string[]>;
+	/**
+	 * The registry's last answer here and when it came, or nothing when it has never answered.
+	 *
+	 * The versions and not merely the time, because the record is machine-wide while a workspace
+	 * holds one project per SDK: a 13.x project refreshing it has to leave a 12.x project beside it
+	 * able to see which 12.x is published, rather than falling back on whichever it has on disk.
+	 */
+	listing (): Promise<RegistryListing|undefined>;
 	/** Fetches one version and answers where it landed, or nothing when it could not be had */
 	install (version: string): Promise<string|undefined>;
 }
@@ -114,21 +143,90 @@ export class NpmAcquirer implements TypesAcquirer {
 			return [];
 		}
 
+		let parsed: unknown;
 		try {
-			const parsed: unknown = JSON.parse(result.stdout);
-			// npm unwraps a single-element list into a bare string
-			return typeof parsed === 'string' ? [ parsed ] : (parsed as string[]);
+			parsed = JSON.parse(result.stdout);
 		} catch {
 			logger.log(`npm answered with something that is not JSON when listing ${packageName} versions`);
 			return [];
+		}
+
+		// npm unwraps a single-element list into a bare string
+		const versions = typeof parsed === 'string' ? [ parsed ] : (parsed as string[]);
+
+		// recorded only for an answer, and after it: a run that failed establishes nothing about
+		// what is published, and letting it stand in for a real one would pin the machine to its
+		// cache on the strength of a failure
+		await this.record(versions);
+
+		return versions;
+	}
+
+	/**
+	 * What the registry last said here, read back from the cache
+	 *
+	 * @returns {Promise<RegistryListing|undefined>} The answer, or nothing when there is no usable record
+	 * @memberof NpmAcquirer
+	 */
+	public async listing (): Promise<RegistryListing|undefined> {
+		let written;
+		try {
+			written = await fs.readFile(path.join(this.cacheRoot, LISTING_FILE), 'utf-8');
+		} catch {
+			// the registry has never answered on this machine, or there is no cache at all yet
+			return;
+		}
+
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(written);
+		} catch {
+			// hand edited, truncated, or written by a version that kept something else here. Read
+			// as no answer, which costs one npm run rather than an answer nobody can account for
+			return;
+		}
+
+		const record = parsed as Partial<RegistryListing>|undefined;
+		// a time recorded as text rather than the file's own mtime: a cache directory copied or
+		// restored from elsewhere carries whatever mtime the copy gave it, and what matters is
+		// when the registry answered rather than when the file was last touched
+		if (typeof record?.at !== 'number' || !Array.isArray(record.versions)) {
+			return;
+		}
+
+		return { at: record.at, versions: record.versions.filter((version): version is string => typeof version === 'string') };
+	}
+
+	/**
+	 * Records what the registry has just said.
+	 *
+	 * Written as JSON a person can read, since this sits in a directory users do look in. A cache
+	 * root that cannot be written costs the staleness check and nothing else — the versions have
+	 * already been answered by the time this runs — so it is logged rather than propagated.
+	 *
+	 * @param versions - What the registry said is published
+	 * @returns {Promise<void>} When it has been recorded, or failed to be
+	 * @memberof NpmAcquirer
+	 */
+	private async record (versions: string[]): Promise<void> {
+		const listing: RegistryListing = { at: Date.now(), versions };
+
+		try {
+			// the first run of all asks the registry before anything has been installed, so the
+			// directory this goes in may not exist yet
+			await fs.mkdir(this.cacheRoot, { recursive: true });
+			await fs.writeFile(path.join(this.cacheRoot, LISTING_FILE), `${JSON.stringify(listing, undefined, '\t')}\n`);
+		} catch (error) {
+			logger.log(`Could not record what npm said about ${packageName} versions, so it will be asked again: ${message(error)}`);
 		}
 	}
 
 	/**
 	 * Every version already in the cache.
 	 *
-	 * Read from the disk and never from npm, because this is what there is to choose from when
-	 * npm cannot reach the registry. Only a version whose package is complete counts: npm creates
+	 * Read from the disk and never from npm, because this is what the common case answers from and
+	 * what there is to choose from when npm cannot reach the registry. Only a version whose package
+	 * is complete counts: npm creates
 	 * the prefix before it has fetched anything and the package directory before it has finished
 	 * extracting, so an install that stopped part way leaves a directory named for a version it
 	 * does not hold. Choosing one of those would fail later, with nothing else tried.

@@ -114,6 +114,118 @@ describe('What can be written in a stylesheet', () => {
 			assert.deepEqual(label?.range, { start: text.indexOf('|'), end: text.indexOf('|') });
 		});
 
+		it('should offer selectors on a blank line between two rules', async () => {
+			// the obvious way to start writing a rule: put the cursor on the blank line between two
+			// and ask. Nothing holds that offset, so until this it answered nothing at all
+			const labels = await labelsAt('".a": {\n\tcolor: "red"\n}\n\n|\n\n".b": {\n\tcolor: "blue"\n}\n');
+
+			assert.ok(labels.includes('Label'), 'a tag');
+			assert.ok(labels.includes('.container'), 'a class from the view');
+			assert.ok(labels.includes('#label'), 'an id from the view');
+		});
+
+		it('should offer selectors on a blank line before the first rule', async () => {
+			assert.ok((await labelsAt('|\n\n".a": {\n\tcolor: "red"\n}\n')).includes('Label'));
+		});
+
+		it('should offer selectors on a blank line after the last rule', async () => {
+			assert.ok((await labelsAt('".a": {\n\tcolor: "red"\n}\n\n|')).includes('Label'));
+		});
+
+		it('should offer selectors in a stylesheet with nothing in it yet', async () => {
+			assert.ok((await labelsAt('|')).includes('Label'));
+		});
+
+		it('should offer selectors at column zero of a selector line', async () => {
+			// a rule's range starts at its opening quote, so this already answered — the cases
+			// either side of it are what did not, and all three are one position to a user
+			assert.ok((await labelsAt('|".a": {\n\tcolor: "red"\n}\n')).includes('Label'));
+		});
+
+		it('should offer nothing inside a line comment', async () => {
+			// a comment is trivia, so no rule holds the cursor there either — but accepting a whole
+			// rule would comment out its own opening and leave the closing brace behind, which is
+			// TSS Alloy will not parse
+			assert.deepEqual(await labelsAt('".a": {}\n// |'), []);
+			assert.deepEqual(await labelsAt('".a": {}\n// note | here'), []);
+		});
+
+		it('should offer nothing inside a block comment', async () => {
+			assert.deepEqual(await labelsAt('".a": {}\n/* | */'), []);
+			assert.deepEqual(await labelsAt('".a": {}\n/* unterminated |'), []);
+		});
+
+		it('should offer selectors again after a comment has ended', async () => {
+			assert.ok((await labelsAt('".a": {}\n// note\n|')).includes('Label'), 'the line after a line comment');
+			assert.ok((await labelsAt('".a": {}\n/* note */ |')).includes('Label'), 'after a block comment closes');
+			assert.ok((await labelsAt('|// note')).includes('Label'), 'before a comment begins');
+		});
+
+		it('should offer properties inside a rule that holds a comment', async () => {
+			// the comment check must only guard the top level: a comment inside a body is held by
+			// the rule, so nothing about it reaches the new path
+			assert.ok((await labelsAt('"Label": {\n\t// note\n\t|\n}')).includes('color'));
+		});
+
+		it('should insert a whole rule where there is no rule to complete into', async () => {
+			// at top level there is no `"…": {}` around the cursor, so accepting a name has to
+			// write one — otherwise the user is left with a bare word that Alloy will not parse
+			const top = (await completionsAt('".a": {}\n\n|\n')).find(completion => completion.label === 'Label');
+			const inside = (await completionsAt('"|"')).find(completion => completion.label === 'Label');
+
+			assert.match(top?.insert?.plain ?? '', /^"Label": \{/, `got ${top?.insert?.plain}`);
+			assert.match(top?.insert?.snippet ?? '', /^"Label": \{/);
+			assert.equal(inside?.insert, undefined, 'inside a selector the name alone is right');
+		});
+
+		it('should write the whole rule in the quote the stylesheet uses', async () => {
+			const single = (await completionsAt("'.a': {}\n\n|")).find(completion => completion.label === 'Label');
+
+			assert.match(single?.insert?.plain ?? '', /^'Label': \{/, `got ${single?.insert?.plain}`);
+		});
+
+		it('should escape a selector that would otherwise break the rule it writes', async () => {
+			// a class carrying an apostrophe, in a stylesheet written with single quotes
+			const view = '<Alloy><Window class="it\'s"/></Alloy>';
+			const entry = (await completionsAt("'.a': {}\n\n|", { view })).find(completion => completion.label === ".it's");
+
+			assert.ok(entry, 'expected the class from the view to be offered');
+			assert.match(entry.insert?.plain ?? '', /^'\.it\\'s': \{/, `got ${entry.insert?.plain}`);
+		});
+
+		it('should not let a selector be read as a snippet placeholder', async () => {
+			// `$1` in a class name would be a tab stop, so the name would vanish from what is
+			// inserted and the cursor would land where the class should be
+			const view = '<Alloy><Window class="amount$1"/></Alloy>';
+			const entry = (await completionsAt('".a": {}\n\n|', { view })).find(completion => completion.label === '.amount$1');
+
+			assert.ok(entry, 'expected the class from the view to be offered');
+			assert.ok(entry.insert?.snippet.startsWith('"\\.amount\\$1": {') || entry.insert?.snippet.startsWith('".amount\\$1": {'),
+				`the name must survive as text, got ${entry.insert?.snippet}`);
+			assert.match(entry.insert?.snippet ?? '', /\$0/, 'the body placeholder is the one that stays live');
+			assert.equal(entry.insert?.plain, '".amount$1": {\n\t\n}', 'the plain form takes no escaping');
+		});
+
+		it('should replace nothing but the cursor when it writes a whole rule', async () => {
+			const text = '".a": {}\n\n|\n';
+			const label = (await completionsAt(text)).find(completion => completion.label === 'Label');
+
+			assert.deepEqual(label?.range, { start: text.indexOf('|'), end: text.indexOf('|') });
+		});
+
+		it('should not offer selectors inside a rule, where properties belong', async () => {
+			// the top level answer must not leak into a body, which answers properties
+			const labels = await labelsAt('"Label": {\n\t|\n}\n');
+
+			assert.ok(!labels.includes('Label'), 'a tag is not a property');
+			assert.ok(labels.includes('color'), 'properties are what belong there');
+		});
+
+		it('should offer nothing at top level in a classic project', async () => {
+			// a classic project has no views to read classes and ids from, and no Alloy at all
+			assert.deepEqual(await labelsAt('|', { fixture: 'classic-project' }), []);
+		});
+
 		it('should offer the classes of every view in app.tss, the widgets\' included', async () => {
 			// thirdClass is in index.xml, testClass in sample.xml
 			const labels = await labelsAt('"|"', { style: path.join('styles', 'app.tss') });
@@ -336,8 +448,13 @@ describe('What can be written in a stylesheet', () => {
 		});
 	});
 
-	it('should answer nothing outside any rule', async () => {
-		assert.deepEqual(await labelsAt('"Label": {}\n|'), []);
+	it('should answer selectors outside any rule, which is where a new rule starts', async () => {
+		// this asserted nothing was answered here until #86. Nothing holds the offset, and a
+		// selector is the only thing that can be written at the top level
+		const labels = await labelsAt('"Label": {}\n|');
+
+		assert.ok(labels.includes('Window'), 'a tag');
+		assert.ok(labels.includes('.container'), 'a class from the view it styles');
 	});
 
 	it('should answer nothing in a classic project, which has no stylesheets', async () => {

@@ -13,11 +13,11 @@ import { SourceCache } from '../core/references.ts';
 import { Project } from '../core/project.ts';
 import { ProjectRegistry } from '../core/registry.ts';
 import { ProjectServices } from '../core/typescript/services.ts';
-import { AcquiredTypes, ProjectTypes } from '../core/typescript/types.ts';
+import { AcquiredTypes, ProjectTypes, SdkTypes } from '../core/typescript/types.ts';
 import type { TypesSource } from '../core/typescript/types.ts';
 import { NpmAcquirer } from '../core/typescript/acquire.ts';
 import { typesCoverSdk } from '../core/typescript/versions.ts';
-import { isTiapp, route } from '../core/routing.ts';
+import { isTiapp, noProjectReason, noRoleReason, route } from '../core/routing.ts';
 import { styleCompletionsAt } from '../core/style.ts';
 import { tiappCompletionsAt } from '../core/tiapp.ts';
 import type { InstalledSource } from '../core/tiapp.ts';
@@ -89,18 +89,27 @@ export class TiLanguageService {
 	private diagnosed = new Set<string>();
 	/** The projects already told their types are too old to warn from, so it is said once */
 	private explained = new Set<string>();
+	/**
+	 * Why each document was last answered nothing.
+	 *
+	 * These handlers run on every keystroke, so the reason is logged only when it changes. An
+	 * identical line per request would bury everything else in the log, which is the state this
+	 * was added to fix rather than one to swap for another.
+	 */
+	private dropped = new Map<string, string>();
 
 	/**
 	 * @param connection - The connection to serve on
 	 * @param typesSources - Where `@types/titanium` comes from, in preference order. Defaults to
-	 *   the project's own copy, then npm. A test supplies its own rather than reaching the network.
+	 *   the project's own copy, then the declarations its SDK ships, then npm. A test supplies its
+	 *   own rather than reaching the network.
 	 * @param titanium - What is installed on the machine. Defaults to asking the Titanium CLI; a
 	 *   test supplies its own rather than reading whatever the machine running it has installed.
 	 * @param delay - How long after an edit the open documents are checked, in milliseconds
 	 */
 	constructor (
 		connection = vls.createConnection(vls.ProposedFeatures.all),
-		typesSources: TypesSource[] = [ new ProjectTypes(), new AcquiredTypes(new NpmAcquirer()) ],
+		typesSources: TypesSource[] = [ new ProjectTypes(), new SdkTypes(), new AcquiredTypes(new NpmAcquirer()) ],
 		titanium: InstalledSource = new TitaniumCli(),
 		delay = DIAGNOSTIC_DELAY
 	) {
@@ -129,6 +138,9 @@ export class TiLanguageService {
 		});
 		this.documents.onDidClose(closed => {
 			this.cache.forget(toPath(closed.document.uri));
+			// a document opened again is worth explaining again, and nothing should grow without
+			// bound for the life of the server
+			this.dropped.delete(toPath(closed.document.uri));
 			this.clearDiagnostics(closed.document.uri);
 			// the file reads as it was saved again, which can change what its neighbours get wrong
 			this.scheduleDiagnostics();
@@ -308,7 +320,7 @@ export class TiLanguageService {
 			const view = routed?.kind === 'xml' && routed.role === 'view';
 			const style = routed?.kind === 'tss' && routed.role === 'style';
 			if (!routed || (!view && !style)) {
-				return null;
+				return this.dropUnrouted(params.textDocument.uri, routed);
 			}
 
 			const source = await this.cache.read(routed.path);
@@ -614,7 +626,7 @@ export class TiLanguageService {
 
 			const script = await this.scriptFor(routed);
 			if (!script) {
-				return null;
+				return this.dropUnrouted(params.textDocument.uri, routed);
 			}
 
 			const offset = offsetAt(script.text, params.position);
@@ -658,7 +670,7 @@ export class TiLanguageService {
 	private async viewCompletions (project: Project, filePath: string, position: vls.Position): Promise<vls.CompletionItem[]|null> {
 		const service = this.services.get(project);
 		if (!service) {
-			return null;
+			return this.drop(toUri(filePath), noServiceReason(project));
 		}
 
 		// the buffer when the document is open, which is what makes the answer current rather than
@@ -697,7 +709,7 @@ export class TiLanguageService {
 	private async styleCompletions (project: Project, filePath: string, position: vls.Position): Promise<vls.CompletionItem[]|null> {
 		const service = this.services.get(project);
 		if (!service) {
-			return null;
+			return this.drop(toUri(filePath), noServiceReason(project));
 		}
 
 		const style = await this.cache.read(filePath);
@@ -841,11 +853,12 @@ export class TiLanguageService {
 
 			const script = await this.scriptFor(routed);
 			if (!script) {
-				return null;
+				return this.dropUnrouted(params.textDocument.uri, routed);
 			}
 
 			const info = script.service.quickInfoAt(script.path, offsetAt(script.text, params.position));
 			if (!info) {
+				// a position with nothing under it is not a request that went astray
 				return null;
 			}
 
@@ -875,7 +888,7 @@ export class TiLanguageService {
 	private async viewHover (project: Project, filePath: string, position: vls.Position): Promise<vls.Hover|null> {
 		const service = this.services.get(project);
 		if (!service) {
-			return null;
+			return this.drop(toUri(filePath), noServiceReason(project));
 		}
 
 		const view = await this.cache.read(filePath);
@@ -907,7 +920,7 @@ export class TiLanguageService {
 	private async styleHover (project: Project, filePath: string, position: vls.Position): Promise<vls.Hover|null> {
 		const service = this.services.get(project);
 		if (!service) {
-			return null;
+			return this.drop(toUri(filePath), noServiceReason(project));
 		}
 
 		const style = await this.cache.read(filePath);
@@ -942,6 +955,55 @@ export class TiLanguageService {
 		// the language id says what the file is written in and the layout says what it does there;
 		// a document the client never opened has no id, and the extension answers instead
 		return route(this.registry, toPath(uri), this.documents.get(uri)?.languageId ?? '');
+	}
+
+	/**
+	 * Logs why a request was answered nothing, and answers nothing.
+	 *
+	 * Written once per document for as long as the reason is the same: a handler of this shape runs
+	 * on every keystroke, and the whole point is a log someone can read. Returns null so a handler
+	 * can say why and answer in one statement.
+	 *
+	 * @param uri - The document the request named
+	 * @param reason - Why nothing could be answered, in words someone can act on
+	 * @returns {null} Nothing, which is what the handler answers
+	 */
+	private drop (uri: string, reason: string): null {
+		const filePath = toPath(uri);
+
+		if (this.dropped.get(filePath) !== reason) {
+			logger.log(`No answer for ${filePath}: ${reason}`);
+			this.dropped.set(filePath, reason);
+		}
+
+		return null;
+	}
+
+	/**
+	 * Why a routed file is not something the handlers can answer for: the project it is in, the
+	 * role its place in that project gave it, or the service its project never got.
+	 *
+	 * A script is the case that needs telling apart. `scriptFor` answers nothing both for a file
+	 * that is not a script and for a project whose service never opened, and a controller is
+	 * squarely a file this server answers for — so naming its role would send its author looking
+	 * at a layout that is correct.
+	 *
+	 * @param uri - The document the request named
+	 * @param routed - What it routed to, when it routed anywhere
+	 * @returns {Promise<null>} Nothing, having said why
+	 */
+	private async dropUnrouted (uri: string, routed: RoutedFile|undefined): Promise<null> {
+		if (!routed) {
+			return this.drop(uri, noProjectReason(this.registry, toPath(uri), this.roots));
+		}
+
+		// the only way a script reaches here: its kind is one the handlers answer for, so what is
+		// missing is the service rather than anything about the file
+		if (routed.kind === 'javascript' || routed.kind === 'typescript') {
+			return this.drop(uri, noServiceReason(routed.project));
+		}
+
+		return this.drop(uri, await noRoleReason(routed));
 	}
 
 	/**
@@ -1007,6 +1069,19 @@ export class TiLanguageService {
 		// reading disk is wrong by one keystroke
 		return { service, path: routed.path, text: (await this.cache.read(routed.path)).text };
 	}
+}
+
+/**
+ * Why a project with no language service cannot be answered for.
+ *
+ * One place rather than five: every handler that asks for a service reports the same condition, and
+ * the reason is cached per document by its text, so two spellings of it would log twice.
+ *
+ * @param project - The project that has no service
+ * @returns {string} Why nothing could be answered
+ */
+function noServiceReason (project: Project): string {
+	return `no language service has been built for ${project.filePath} yet, so nothing can be answered from its types`;
 }
 
 /**

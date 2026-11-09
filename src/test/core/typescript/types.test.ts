@@ -4,8 +4,9 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { Project } from '../../../core/project.ts';
-import { AcquiredTypes, ProjectTypes, resolveTypes } from '../../../core/typescript/types.ts';
-import type { TypesAcquirer } from '../../../core/typescript/acquire.ts';
+import { AcquiredTypes, ProjectTypes, SdkTypes, resolveTypes } from '../../../core/typescript/types.ts';
+import type { RegistryListing, TypesAcquirer } from '../../../core/typescript/acquire.ts';
+import { mobileSdkHost } from '../../../core/titanium.ts';
 import { fixturePath } from '../../fixtures.ts';
 
 /**
@@ -29,14 +30,20 @@ const published = [ '3.5.30', '7.3.1', '8.0.5', '9.2.2', '12.0.8', '13.3.0' ];
  * @param available - The versions it should claim are published
  * @returns The acquirer and the versions it was asked to install
  */
-function fakeAcquirer (available: string[] = published, cached: string[] = []): { acquirer: TypesAcquirer; installed: string[] } {
+function fakeAcquirer (available: string[] = published, cached: string[] = [], listing?: RegistryListing): { acquirer: TypesAcquirer; installed: string[]; asked: () => number } {
 	const installed: string[] = [];
+	let asked = 0;
 
 	return {
 		installed,
+		asked: () => asked,
 		acquirer: {
-			versions: async () => available,
+			versions: async () => {
+				asked++;
+				return available;
+			},
 			cached: async () => cached,
+			listing: async () => listing,
 			install: async version => {
 				installed.push(version);
 				const root = await fs.mkdtemp(path.join(os.tmpdir(), 'ti-ls-types-'));
@@ -54,8 +61,15 @@ function fakeAcquirer (available: string[] = published, cached: string[] = []): 
 const offlineAcquirer: TypesAcquirer = {
 	versions: async () => [],
 	cached: async () => [],
+	listing: async () => undefined,
 	install: async () => undefined
 };
+
+/** The registry's answer, recorded just now */
+const justNow = (versions: string[] = published): RegistryListing => ({ at: Date.now(), versions });
+
+/** The registry's answer, recorded two days ago, which is past the staleness window */
+const longAgo = (versions: string[] = published): RegistryListing => ({ at: Date.now() - (2 * 24 * 60 * 60 * 1000), versions });
 
 describe('Resolving @types/titanium', () => {
 
@@ -159,14 +173,240 @@ describe('Resolving @types/titanium', () => {
 			assert.equal(await new AcquiredTypes(acquirer).locate(await project('alloy-project')), undefined);
 		});
 
+		it('should pin no project to a stale version when another refreshes the record', async () => {
+			// the record is machine-wide, so a 13.x project refreshing it must not leave a 12.x
+			// project beside it reading its own cache. The registry answered 12.0.8 moments ago,
+			// and a cached 12.0.2 is not the answer just because it is the newest 12.x on disk
+			const { acquirer, installed } = fakeAcquirer(published, [ '12.0.2', '13.3.0' ], justNow());
+
+			const resolved = await new AcquiredTypes(acquirer).locate(await project('classic-project'));
+
+			assert.deepEqual(installed, [ '12.0.8' ], 'the recorded list names 12.0.8, so that is the answer');
+			assert.equal(resolved?.location?.version, '12.0.8');
+		});
+
+		it('should take an older major from the record, since the record is a real registry answer', async () => {
+			// alloy-project is on 10.1.0.GA and nothing 10.x is published. Reading that off the
+			// recorded list is as sound as reading it off a live one, so it needs no second ask
+			const { acquirer, asked } = fakeAcquirer(published, [ '9.2.2' ], justNow());
+
+			const resolved = await new AcquiredTypes(acquirer).locate(await project('alloy-project'));
+
+			assert.equal(asked(), 0);
+			assert.equal(resolved?.location?.version, '9.2.2');
+			assert.equal(resolved.report.level, 'warning');
+			assert.match(resolved.report.message, /is published/, 'the list is the registry\'s, so it can say what is published');
+		});
+
+		it('should answer from a recently recorded listing without asking npm at all', async () => {
+			// the measured cost of the first request: two `npm view` spawns, one per project in the
+			// workspace, each establishing a version already sitting on disk
+			const { acquirer, installed, asked } = fakeAcquirer(published, [ '12.0.8' ], justNow());
+
+			const resolved = await new AcquiredTypes(acquirer).locate(await project('classic-project'));
+
+			assert.equal(asked(), 0, 'the registry must not be asked when the cache was just checked');
+			assert.deepEqual(installed, [ '12.0.8' ]);
+			assert.equal(resolved?.location?.version, '12.0.8');
+			assert.equal(resolved.report.level, 'info');
+		});
+
+		it('should not say the registry was unreachable when it was simply not asked', async () => {
+			// the two conditions are different and the message must not collapse them: a fresh
+			// cache answered on purpose, and an unreachable registry answered for want of anything
+			// better
+			const { acquirer } = fakeAcquirer(published, [ '12.0.8' ], justNow());
+
+			const resolved = await new AcquiredTypes(acquirer).locate(await project('classic-project'));
+
+			assert.doesNotMatch(resolved?.report.message ?? '', /could not be reached/);
+			assert.match(resolved?.report.message ?? '', /from the cache/, 'should still say where it came from');
+			assert.match(resolved?.report.message ?? '', /last asked/, 'should say when npm was last asked, so the user can see why');
+		});
+
+		it('should say how long ago npm was asked, in the roundest terms that are true', async () => {
+			// the point is to show the answer is current, not to be precise about it
+			const cases: [ number, RegExp ][] = [
+				[ 0, /just now/ ],
+				[ 60 * 1000, /1 minute ago/ ],
+				[ 7 * 60 * 1000, /7 minutes ago/ ],
+				[ 60 * 60 * 1000, /1 hour ago/ ],
+				[ 5 * 60 * 60 * 1000, /5 hours ago/ ]
+			];
+
+			for (const [ ago, expected ] of cases) {
+				const { acquirer } = fakeAcquirer(published, [ '12.0.8' ], { at: Date.now() - ago, versions: published });
+
+				const resolved = await new AcquiredTypes(acquirer).locate(await project('classic-project'));
+
+				assert.match(resolved?.report.message ?? '', expected, `${ago}ms ago`);
+			}
+		});
+
+		it('should ask npm again once the record has gone stale', async () => {
+			// a staleness window rather than a machine pinned forever to whatever it fetched first
+			const { acquirer, installed, asked } = fakeAcquirer(published, [ '12.0.2' ], longAgo([ '12.0.2' ]));
+
+			await new AcquiredTypes(acquirer).locate(await project('classic-project'));
+
+			assert.equal(asked(), 1);
+			assert.deepEqual(installed, [ '12.0.8' ], 'the newer release published since should win');
+		});
+
+		it('should ask npm when the registry has never answered here', async () => {
+			const { acquirer, asked } = fakeAcquirer(published, [ '12.0.8' ], undefined);
+
+			await new AcquiredTypes(acquirer).locate(await project('classic-project'));
+
+			assert.equal(asked(), 1, 'a cache nobody has a registry answer for says nothing about what is published');
+		});
+
+		it('should install from the record when what it names is not on disk', async () => {
+			// skipping the lookup is not skipping the fetch: the package still has to be there
+			const { acquirer, asked, installed } = fakeAcquirer(published, [], justNow());
+
+			await new AcquiredTypes(acquirer).locate(await project('classic-project'));
+
+			assert.equal(asked(), 0, 'the recorded list already answers which version');
+			assert.deepEqual(installed, [ '12.0.8' ]);
+		});
+
+		it('should treat a record from the future as no record at all', async () => {
+			// a clock moved backwards, or a cache copied from another machine
+			const { acquirer, asked } = fakeAcquirer(published, [ '12.0.8' ], { at: Date.now() + (60 * 60 * 1000), versions: published });
+
+			await new AcquiredTypes(acquirer).locate(await project('classic-project'));
+
+			assert.equal(asked(), 1);
+		});
+
+		it('should ask npm when the record holds no versions at all', async () => {
+			const { acquirer, asked } = fakeAcquirer(published, [ '12.0.8' ], { at: Date.now(), versions: [] });
+
+			await new AcquiredTypes(acquirer).locate(await project('classic-project'));
+
+			assert.equal(asked(), 1, 'an empty list is not an answer about what is published');
+		});
+
+		it('should still answer from the cache when a stale record cannot be refreshed', async () => {
+			// the laptop on a train whose window has expired: the registry is asked, fails, and
+			// the cache answers with the message that says so
+			const { acquirer } = fakeAcquirer([], [ '12.0.8' ], longAgo());
+
+			const resolved = await new AcquiredTypes(acquirer).locate(await project('classic-project'));
+
+			assert.equal(resolved?.location?.version, '12.0.8');
+			assert.match(resolved.report.message, /could not be reached/);
+		});
+
+		it('should resolve nothing when the install of a cached version fails', async () => {
+			const acquirer: TypesAcquirer = {
+				versions: async () => published,
+				cached: async () => [ '12.0.8' ],
+				listing: async () => justNow(),
+				install: async () => undefined
+			};
+
+			assert.equal(await new AcquiredTypes(acquirer).locate(await project('classic-project')), undefined);
+		});
+
 		it('should resolve nothing when the install itself fails', async () => {
 			const acquirer: TypesAcquirer = {
 				versions: async () => published,
 				cached: async () => [],
+				listing: async () => undefined,
 				install: async () => undefined
 			};
 
 			assert.equal(await new AcquiredTypes(acquirer).locate(await project('alloy-project')), undefined);
+		});
+	});
+
+	describe('types shipped in the SDK', () => {
+		/**
+		 * A source reading the fixture install location rather than the machine's
+		 *
+		 * @returns {Promise<SdkTypes>} The source
+		 */
+		async function fromTheSdk (): Promise<SdkTypes> {
+			return new SdkTypes([ await fixturePath('titanium-sdk-home') ]);
+		}
+
+		it('should find the declarations the SDK ships', async () => {
+			// classic-project is on 12.4.0.GA, and the fixture install location has a 12.4.0.GA
+			// carrying types/
+			const resolved = await (await fromTheSdk()).locate(await project('classic-project'));
+
+			assert.ok(resolved?.location, 'expected the SDK\'s own declarations to be found');
+			assert.ok(resolved.location.entry.endsWith('index.d.ts'));
+			assert.ok(resolved.location.packagePath.endsWith(path.join('12.4.0.GA', 'types')), resolved.location.packagePath);
+		});
+
+		it('should read the version from the declarations\' own manifest', async () => {
+			// not from the SDK's root package.json, which is titanium_mobile's and has no types
+			// field at all — reading that would report the SDK's version as the types version
+			const resolved = await (await fromTheSdk()).locate(await project('classic-project'));
+
+			assert.equal(resolved?.location?.version, '12.4.0');
+		});
+
+		it('should say which SDK the types came from', async () => {
+			const resolved = await (await fromTheSdk()).locate(await project('classic-project'));
+
+			assert.equal(resolved?.report.level, 'info', 'the SDK\'s own types match it by construction');
+			assert.match(resolved.report.message, /12\.4\.0\.GA/, 'should name the SDK it read them from');
+			assert.match(resolved.report.message, /Titanium SDK/);
+		});
+
+		it('should find nothing when the SDK ships none, which is every SDK so far', async () => {
+			// alloy-matched-project is on 9.3.2.GA, which the fixture has installed without types
+			assert.equal(await (await fromTheSdk()).locate(await project('alloy-matched-project')), undefined);
+		});
+
+		it('should find nothing when the types directory holds no entry', async () => {
+			// alloy-project is on 10.1.0.GA, whose types/ was only partly written
+			assert.equal(await (await fromTheSdk()).locate(await project('alloy-project')), undefined);
+		});
+
+		it('should find nothing when the SDK is not installed at all', async () => {
+			// alloy-typed-project is on 12.4.0.GA, so the fixture answers for it; an install
+			// location with nothing in it must not
+			const empty = new SdkTypes([ await fixturePath('not-a-project') ]);
+
+			assert.equal(await empty.locate(await project('alloy-typed-project')), undefined);
+		});
+
+		it('should take the first install location that has it', async () => {
+			const found = new SdkTypes([ await fixturePath('not-a-project'), await fixturePath('titanium-sdk-home') ]);
+
+			assert.ok((await found.locate(await project('classic-project')))?.location);
+		});
+
+		it('should say so rather than guess when the declarations carry no version', async () => {
+			// a manifest without a version still names a usable entry, so the types are used and
+			// the report says what it does not know
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), 'ti-ls-sdk-'));
+			const types = path.join(root, 'mobilesdk', mobileSdkHost(), '12.4.0.GA', 'types');
+			await fs.mkdir(types, { recursive: true });
+			await fs.writeFile(path.join(types, 'index.d.ts'), 'declare const Ti: unknown;');
+
+			const resolved = await new SdkTypes([ root ]).locate(await project('classic-project'));
+
+			assert.ok(resolved?.location);
+			assert.equal(resolved.location.version, undefined);
+			assert.match(resolved.report.message, /of unknown version/);
+			assert.match(resolved.report.message, /12\.4\.0\.GA/, 'should still name the SDK');
+		});
+
+		it('should find nothing for a project with no sdk-version', async () => {
+			// the registry turns such a project away, but the source must not throw if it is asked
+			assert.equal(await (await fromTheSdk()).locate(await project('no-sdk-project')), undefined);
+		});
+
+		it('should default to this machine\'s install locations', async () => {
+			// nothing ships these types yet, so on a real machine this resolves nothing — what is
+			// under test is that asking costs nothing and throws nothing
+			assert.doesNotReject(async () => new SdkTypes().locate(await project('classic-project')));
 		});
 	});
 
@@ -186,6 +426,41 @@ describe('Resolving @types/titanium', () => {
 			const resolved = await resolveTypes(await project('alloy-project'), [ new ProjectTypes(), new AcquiredTypes(acquirer) ]);
 
 			assert.ok(resolved.location);
+			assert.deepEqual(installed, [ '9.2.2' ]);
+		});
+
+		it('should prefer the project\'s own copy over the SDK\'s', async () => {
+			// the project compiles against its own node_modules, so that is the program the editor
+			// must describe — whatever the SDK beside it ships
+			const sdk = new SdkTypes([ await fixturePath('titanium-sdk-home') ]);
+
+			const resolved = await resolveTypes(await project('classic-project'), [ new ProjectTypes(), sdk, new AcquiredTypes(fakeAcquirer().acquirer) ]);
+
+			assert.equal(resolved.location?.source, 'the project');
+			assert.equal(resolved.location?.version, '9.2.2');
+		});
+
+		it('should prefer the SDK\'s types over acquiring from npm', async () => {
+			// the SDK's own declarations describe exactly the SDK being built against, and cost a
+			// stat rather than an npm spawn
+			const sdk = new SdkTypes([ await fixturePath('titanium-sdk-home') ]);
+			const { acquirer, installed } = fakeAcquirer();
+
+			const resolved = await resolveTypes(await project('classic-untyped-project'), [ new ProjectTypes(), sdk, new AcquiredTypes(acquirer) ]);
+
+			assert.equal(resolved.location?.source, 'the Titanium SDK');
+			assert.deepEqual(installed, [], 'npm should not have been reached for at all');
+		});
+
+		it('should fall through to npm for an SDK that ships no types', async () => {
+			// every SDK released so far, which is why npm stays the fallback rather than being
+			// replaced
+			const sdk = new SdkTypes([ await fixturePath('titanium-sdk-home') ]);
+			const { acquirer, installed } = fakeAcquirer();
+
+			const resolved = await resolveTypes(await project('alloy-project'), [ new ProjectTypes(), sdk, new AcquiredTypes(acquirer) ]);
+
+			assert.equal(resolved.location?.source, 'npm');
 			assert.deepEqual(installed, [ '9.2.2' ]);
 		});
 

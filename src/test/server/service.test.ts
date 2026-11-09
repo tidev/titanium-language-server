@@ -62,6 +62,189 @@ describe('The language service adapter', () => {
 
 	afterEach(() => logger.detach());
 
+	describe('saying why nothing was answered', () => {
+		/** Only the lines explaining a dropped request, which is what these tests are about */
+		const reasons = (): string[] => connection.logs.filter(line => line.startsWith('No answer for'));
+
+		it('should say when the file is in no registered project', async () => {
+			await connection.initialize({ rootUri: URI.file(root).toString() });
+			const outside = URI.file(path.join(os.tmpdir(), 'nowhere', 'index.tss')).toString();
+			connection.open(outside, 'tss', '"|": {}');
+
+			assert.equal(await connection.completion(outside, 0, 1), null);
+			assert.equal(reasons().length, 1, connection.logs.join('\n'));
+			assert.match(reasons()[0], /nowhere/, 'should name the document');
+			assert.match(reasons()[0], /not inside any folder the editor opened/);
+		});
+
+		it('should say when no project is registered under the folder at all', async () => {
+			// the case most likely to be hit and least likely to be guessed: a workspace folder
+			// whose projects sit deeper than the one level that is scanned
+			const deep = await fixturePath('not-a-project');
+			await connection.initialize({ rootUri: URI.file(deep).toString() });
+			const inside = URI.file(path.join(deep, 'app', 'styles', 'index.tss')).toString();
+			connection.open(inside, 'tss', '"Label": {}');
+
+			await connection.completion(inside, 0, 1);
+
+			assert.match(reasons()[0], /No Titanium project is registered under/);
+			assert.match(reasons()[0], /directly inside/, 'should say how far down projects are looked for');
+			assert.match(reasons()[0], /sdk-version/, 'should say what makes a directory a project');
+		});
+
+		it('should say when a classic project gives a .tss no Alloy role', async () => {
+			const classic = await fixturePath('classic-project');
+			await connection.initialize({ rootUri: URI.file(classic).toString() });
+			const style = URI.file(path.join(classic, 'Resources', 'app.tss')).toString();
+			connection.open(style, 'tss', '"Label": {}');
+
+			await connection.completion(style, 0, 1);
+
+			assert.match(reasons()[0], /classic project/);
+			assert.match(reasons()[0], /Alloy/);
+		});
+
+		it('should say when a stylesheet sits outside app/styles', async () => {
+			await connection.initialize({ rootUri: URI.file(root).toString() });
+			const stray = URI.file(path.join(root, 'app', 'assets', 'index.tss')).toString();
+			connection.open(stray, 'tss', '"Label": {}');
+
+			await connection.completion(stray, 0, 1);
+
+			assert.match(reasons()[0], /app\/styles/);
+		});
+
+		it('should say when a view sits outside app/views', async () => {
+			await connection.initialize({ rootUri: URI.file(root).toString() });
+			const stray = URI.file(path.join(root, 'app', 'assets', 'index.xml')).toString();
+			connection.open(stray, 'xml', '<Alloy></Alloy>');
+
+			await connection.completion(stray, 0, 7);
+
+			assert.match(reasons()[0], /app\/views/);
+		});
+
+		it('should say the same for hover and definition', async () => {
+			await connection.initialize({ rootUri: URI.file(root).toString() });
+			const stray = URI.file(path.join(root, 'app', 'assets', 'index.tss')).toString();
+			connection.open(stray, 'tss', '"Label": {}');
+
+			assert.equal(await connection.hover(stray, 0, 1), null);
+			assert.equal(await connection.definition(stray, 0, 1), null);
+
+			assert.ok(reasons().length >= 1, 'every handler of the shape should say why');
+			assert.match(reasons()[0], /app\/styles/);
+		});
+
+		it('should say it once however many keystrokes ask', async () => {
+			// these run on every keystroke, so an identical line per request would bury everything
+			// else in the log
+			await connection.initialize({ rootUri: URI.file(root).toString() });
+			const stray = URI.file(path.join(root, 'app', 'assets', 'index.tss')).toString();
+			connection.open(stray, 'tss', '"Label": {}');
+
+			for (let keystroke = 0; keystroke < 5; keystroke++) {
+				await connection.completion(stray, 0, 1);
+			}
+
+			assert.equal(reasons().length, 1, reasons().join('\n'));
+		});
+
+		it('should say it again when the reason changes', async () => {
+			await connection.initialize({ rootUri: URI.file(root).toString() });
+			const stray = URI.file(path.join(root, 'app', 'assets', 'index.tss')).toString();
+			const outside = URI.file(path.join(os.tmpdir(), 'nowhere', 'other.tss')).toString();
+			connection.open(stray, 'tss', '"Label": {}');
+			connection.open(outside, 'tss', '"Label": {}');
+
+			await connection.completion(stray, 0, 1);
+			await connection.completion(outside, 0, 1);
+			await connection.completion(stray, 0, 1);
+
+			assert.equal(reasons().length, 2, 'one per document, not one per request');
+		});
+
+		it('should say a controller has no language service rather than blame its role', async () => {
+			// `scriptFor` answers nothing both for a file that is not a script and for a project
+			// whose service never opened. A controller is squarely a file this server answers for,
+			// so reporting its role as the problem would send its author looking at a layout that
+			// is correct.
+			//
+			// A project with no types still gets a service, which answers less — so the way to
+			// have none at all is for opening to fail, which `openServices` contains per project.
+			// A source that throws is that, injected
+			const broken = new TiLanguageService(connection.asConnection(), [ {
+				name: 'a source that cannot answer',
+				locate: () => Promise.reject(new Error('the types could not be resolved'))
+			} ]);
+			broken.listen();
+			await connection.initialize({ rootUri: URI.file(root).toString() });
+			const controller = uriFor('app', 'controllers', 'index.js');
+			connection.open(controller, 'javascript', '$.');
+
+			assert.equal(await connection.completion(controller, 1, 2), null);
+
+			const said = reasons();
+			assert.equal(said.length, 1, connection.logs.join('\n'));
+			assert.match(said[0], /no language service has been built/, said[0]);
+			assert.doesNotMatch(said[0], /role "controller"/, 'the role is not what stopped it');
+		});
+
+		it('should say the same for a view and a stylesheet with no service', async () => {
+			const broken = new TiLanguageService(connection.asConnection(), [ {
+				name: 'a source that cannot answer',
+				locate: () => Promise.reject(new Error('the types could not be resolved'))
+			} ]);
+			broken.listen();
+			await connection.initialize({ rootUri: URI.file(root).toString() });
+			const view = uriFor('app', 'views', 'index.xml');
+			const style = uriFor('app', 'styles', 'index.tss');
+			connection.open(view, 'xml', '<Alloy><Label /></Alloy>');
+			connection.open(style, 'tss', '"Label": {}');
+
+			assert.equal(await connection.completion(view, 0, 14), null);
+			assert.equal(await connection.completion(style, 0, 1), null);
+
+			assert.equal(reasons().length, 2, 'one per document');
+			for (const said of reasons()) {
+				assert.match(said, /no language service has been built/, said);
+			}
+		});
+
+		it('should say nothing when the request was answered', async () => {
+			await connection.initialize({ rootUri: URI.file(root).toString() });
+			const style = uriFor('app', 'styles', 'index.tss');
+			connection.open(style, 'tss', '"Label": {}');
+
+			assert.notEqual(await connection.completion(style, 0, 1), null);
+			assert.deepEqual(reasons(), []);
+		});
+
+		it('should say nothing for a tiapp.xml, which is answered without a project', async () => {
+			await connection.initialize({ rootUri: URI.file(root).toString() });
+			const tiapp = uriFor('tiapp.xml');
+			connection.open(tiapp, 'xml', '<ti:app><sdk-version>10.1.0.GA</sdk-version></ti:app>');
+
+			await connection.completion(tiapp, 0, 8);
+
+			assert.deepEqual(reasons(), []);
+		});
+
+		it('should forget a document when it is closed', async () => {
+			// the reason is cached per path, and a reopened document is worth saying again
+			await connection.initialize({ rootUri: URI.file(root).toString() });
+			const stray = URI.file(path.join(root, 'app', 'assets', 'index.tss')).toString();
+			connection.open(stray, 'tss', '"Label": {}');
+
+			await connection.completion(stray, 0, 1);
+			connection.close(stray);
+			connection.open(stray, 'tss', '"Label": {}');
+			await connection.completion(stray, 0, 1);
+
+			assert.equal(reasons().length, 2);
+		});
+	});
+
 	describe('initialize', () => {
 		it('should advertise what it can do', async () => {
 			const result = await connection.initialize();
