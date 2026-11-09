@@ -164,6 +164,53 @@ describe('The language service adapter', () => {
 			assert.equal(reasons().length, 2, 'one per document, not one per request');
 		});
 
+		it('should say a controller has no language service rather than blame its role', async () => {
+			// `scriptFor` answers nothing both for a file that is not a script and for a project
+			// whose service never opened. A controller is squarely a file this server answers for,
+			// so reporting its role as the problem would send its author looking at a layout that
+			// is correct.
+			//
+			// A project with no types still gets a service, which answers less — so the way to
+			// have none at all is for opening to fail, which `openServices` contains per project.
+			// A source that throws is that, injected
+			const broken = new TiLanguageService(connection.asConnection(), [ {
+				name: 'a source that cannot answer',
+				locate: () => Promise.reject(new Error('the types could not be resolved'))
+			} ]);
+			broken.listen();
+			await connection.initialize({ rootUri: URI.file(root).toString() });
+			const controller = uriFor('app', 'controllers', 'index.js');
+			connection.open(controller, 'javascript', '$.');
+
+			assert.equal(await connection.completion(controller, 1, 2), null);
+
+			const said = reasons();
+			assert.equal(said.length, 1, connection.logs.join('\n'));
+			assert.match(said[0], /no language service has been built/, said[0]);
+			assert.doesNotMatch(said[0], /role "controller"/, 'the role is not what stopped it');
+		});
+
+		it('should say the same for a view and a stylesheet with no service', async () => {
+			const broken = new TiLanguageService(connection.asConnection(), [ {
+				name: 'a source that cannot answer',
+				locate: () => Promise.reject(new Error('the types could not be resolved'))
+			} ]);
+			broken.listen();
+			await connection.initialize({ rootUri: URI.file(root).toString() });
+			const view = uriFor('app', 'views', 'index.xml');
+			const style = uriFor('app', 'styles', 'index.tss');
+			connection.open(view, 'xml', '<Alloy><Label /></Alloy>');
+			connection.open(style, 'tss', '"Label": {}');
+
+			assert.equal(await connection.completion(view, 0, 14), null);
+			assert.equal(await connection.completion(style, 0, 1), null);
+
+			assert.equal(reasons().length, 2, 'one per document');
+			for (const said of reasons()) {
+				assert.match(said, /no language service has been built/, said);
+			}
+		});
+
 		it('should say nothing when the request was answered', async () => {
 			await connection.initialize({ rootUri: URI.file(root).toString() });
 			const style = uriFor('app', 'styles', 'index.tss');

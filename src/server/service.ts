@@ -670,7 +670,7 @@ export class TiLanguageService {
 	private async viewCompletions (project: Project, filePath: string, position: vls.Position): Promise<vls.CompletionItem[]|null> {
 		const service = this.services.get(project);
 		if (!service) {
-			return this.drop(toUri(filePath), `no language service has been built for ${project.filePath} yet, so nothing can be answered from its types`);
+			return this.drop(toUri(filePath), noServiceReason(project));
 		}
 
 		// the buffer when the document is open, which is what makes the answer current rather than
@@ -709,7 +709,7 @@ export class TiLanguageService {
 	private async styleCompletions (project: Project, filePath: string, position: vls.Position): Promise<vls.CompletionItem[]|null> {
 		const service = this.services.get(project);
 		if (!service) {
-			return this.drop(toUri(filePath), `no language service has been built for ${project.filePath} yet, so nothing can be answered from its types`);
+			return this.drop(toUri(filePath), noServiceReason(project));
 		}
 
 		const style = await this.cache.read(filePath);
@@ -888,7 +888,7 @@ export class TiLanguageService {
 	private async viewHover (project: Project, filePath: string, position: vls.Position): Promise<vls.Hover|null> {
 		const service = this.services.get(project);
 		if (!service) {
-			return this.drop(toUri(filePath), `no language service has been built for ${project.filePath} yet, so nothing can be answered from its types`);
+			return this.drop(toUri(filePath), noServiceReason(project));
 		}
 
 		const view = await this.cache.read(filePath);
@@ -920,7 +920,7 @@ export class TiLanguageService {
 	private async styleHover (project: Project, filePath: string, position: vls.Position): Promise<vls.Hover|null> {
 		const service = this.services.get(project);
 		if (!service) {
-			return this.drop(toUri(filePath), `no language service has been built for ${project.filePath} yet, so nothing can be answered from its types`);
+			return this.drop(toUri(filePath), noServiceReason(project));
 		}
 
 		const style = await this.cache.read(filePath);
@@ -980,17 +980,30 @@ export class TiLanguageService {
 	}
 
 	/**
-	 * Why a routed file is not something the handlers can answer for, which is either the project
-	 * it is in or the role its place in that project gave it
+	 * Why a routed file is not something the handlers can answer for: the project it is in, the
+	 * role its place in that project gave it, or the service its project never got.
+	 *
+	 * A script is the case that needs telling apart. `scriptFor` answers nothing both for a file
+	 * that is not a script and for a project whose service never opened, and a controller is
+	 * squarely a file this server answers for — so naming its role would send its author looking
+	 * at a layout that is correct.
 	 *
 	 * @param uri - The document the request named
 	 * @param routed - What it routed to, when it routed anywhere
 	 * @returns {Promise<null>} Nothing, having said why
 	 */
 	private async dropUnrouted (uri: string, routed: RoutedFile|undefined): Promise<null> {
-		return this.drop(uri, routed
-			? await noRoleReason(routed)
-			: noProjectReason(this.registry, toPath(uri), this.roots));
+		if (!routed) {
+			return this.drop(uri, noProjectReason(this.registry, toPath(uri), this.roots));
+		}
+
+		// the only way a script reaches here: its kind is one the handlers answer for, so what is
+		// missing is the service rather than anything about the file
+		if (routed.kind === 'javascript' || routed.kind === 'typescript') {
+			return this.drop(uri, noServiceReason(routed.project));
+		}
+
+		return this.drop(uri, await noRoleReason(routed));
 	}
 
 	/**
@@ -1056,6 +1069,19 @@ export class TiLanguageService {
 		// reading disk is wrong by one keystroke
 		return { service, path: routed.path, text: (await this.cache.read(routed.path)).text };
 	}
+}
+
+/**
+ * Why a project with no language service cannot be answered for.
+ *
+ * One place rather than five: every handler that asks for a service reports the same condition, and
+ * the reason is cached per document by its text, so two spellings of it would log twice.
+ *
+ * @param project - The project that has no service
+ * @returns {string} Why nothing could be answered
+ */
+function noServiceReason (project: Project): string {
+	return `no language service has been built for ${project.filePath} yet, so nothing can be answered from its types`;
 }
 
 /**
