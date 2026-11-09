@@ -6,6 +6,7 @@ import path from 'node:path';
 import type { CompletionItem, InitializeResult } from 'vscode-languageserver';
 import { URI } from 'vscode-uri';
 import { LspTestClient } from '../server/lsp-client.ts';
+import { LISTING_FILE } from '../../core/typescript/acquire.ts';
 import { fixturePath } from '../fixtures.ts';
 
 /**
@@ -133,6 +134,18 @@ describe('Acquiring @types/titanium from npm, end to end', { timeout: TIMEOUT * 
 
 			assert.equal(version, versionUsed(client));
 		});
+
+		it('should have recorded what the registry said, versions and all', async () => {
+			// what the record is for: the next project in the workspace resolves off this list
+			// rather than off whichever versions happen to be on disk, so a 12.x project cannot be
+			// pinned to a cached 12.0.2 by a 13.x project having refreshed the record
+			const listing = JSON.parse(await fs.readFile(path.join(typesCache, LISTING_FILE), 'utf-8')) as { at: number; versions: string[] };
+
+			assert.ok(listing.versions.length > 2, `expected the published list, got ${listing.versions.join(', ')}`);
+			assert.ok(listing.versions.includes(versionUsed(client) ?? ''), `expected ${versionUsed(client)} among them`);
+			assert.ok(listing.versions.some(version => version.startsWith('9.')), 'should carry the majors other projects need, not just this one\'s');
+			assert.ok(Date.now() - listing.at < 10 * 60 * 1000, 'should have been recorded during this run');
+		});
 	});
 
 	describe('an Alloy project with no types of its own', () => {
@@ -158,6 +171,7 @@ describe('Acquiring @types/titanium from npm, end to end', { timeout: TIMEOUT * 
 
 			assert.equal(versions.length, 2, `expected two versions in the cache, got ${versions.join(', ')}`);
 		});
+
 	});
 
 	describe('a second run against a cache the registry was just asked about', () => {
@@ -205,9 +219,11 @@ describe('Acquiring @types/titanium from npm, end to end', { timeout: TIMEOUT * 
 
 		before(async () => {
 			// back-dated past the staleness window, so the registry is asked for real — and
-			// fails, which is the condition the message below is about. The name is the acquirer's
-			// own record, which lives beside the version directories
-			await fs.writeFile(path.join(typesCache, '.last-registry-check'), new Date(Date.now() - (2 * 24 * 60 * 60 * 1000)).toISOString());
+			// fails, which is the condition the message below is about. The versions are kept as
+			// they were, so only the age differs from the run above
+			const record = path.join(typesCache, LISTING_FILE);
+			const listing = JSON.parse(await fs.readFile(record, 'utf-8')) as { at: number; versions: string[] };
+			await fs.writeFile(record, JSON.stringify({ ...listing, at: Date.now() - (2 * 24 * 60 * 60 * 1000) }));
 
 			({ client, root } = await serverOn('classic-untyped-project', typesCache, false));
 		});
@@ -227,13 +243,12 @@ describe('Acquiring @types/titanium from npm, end to end', { timeout: TIMEOUT * 
 				`expected the log to say why the registry was not consulted, got:\n${logged(client).join('\n')}`);
 		});
 
-		it('should not have recorded a check the registry never answered', async () => {
+		it('should not have recorded an answer the registry never gave', async () => {
 			// a failed lookup establishes nothing about what is published, so it must not stand in
-			// for a real check and pin the machine to its cache
-			const recorded = await fs.readFile(path.join(typesCache, '.last-registry-check'), 'utf-8');
+			// for a real one and pin the machine to its cache
+			const { at } = JSON.parse(await fs.readFile(path.join(typesCache, LISTING_FILE), 'utf-8')) as { at: number };
 
-			assert.ok(Date.now() - Date.parse(recorded.trim()) > 24 * 60 * 60 * 1000,
-				`expected the stale record to be left alone, got ${recorded.trim()}`);
+			assert.ok(Date.now() - at > 24 * 60 * 60 * 1000, `expected the stale record to be left alone, got ${new Date(at).toISOString()}`);
 		});
 	});
 });

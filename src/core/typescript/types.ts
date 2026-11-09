@@ -203,11 +203,12 @@ type OriginatedSelection =
 /**
  * Types fetched from npm, keyed to the tiapp's `sdk-version`.
  *
- * The cache is consulted before the registry rather than after it. `npm view` costs around 280ms
+ * The registry's last answer is consulted before asking it again. `npm view` costs around 280ms
  * and is paid once per project in the workspace, so a two-project workspace spent over half a
  * second of its first request establishing versions that were already sitting on disk. What makes
- * skipping it safe is the record of when the registry last answered: a cached version is taken on
- * its own only while that record is recent, and otherwise the registry is asked exactly as before.
+ * skipping it safe is that the answer itself is recorded, versions and all, so the same rule runs
+ * over the same kind of list; only while that record is recent, and otherwise the registry is
+ * asked exactly as before.
  */
 export class AcquiredTypes implements TypesSource {
 
@@ -257,23 +258,22 @@ export class AcquiredTypes implements TypesSource {
 	/**
 	 * Which version to use, and how that was arrived at.
 	 *
-	 * The cache first, and only when it already holds the SDK's own major: that is nearly every
-	 * project, and it is the case where asking the registry can only ever turn up a release that
-	 * adds members to the same major. An older major is the opposite — the rarest answer and the
-	 * one most worth getting right — so it is never taken from the cache on trust, however
-	 * recently the registry answered.
+	 * The recorded answer first, when the registry gave one recently enough. The rule runs over
+	 * that recorded list rather than over what happens to be installed, which is the difference
+	 * between a sound shortcut and a machine pinned to its own cache: the record is machine-wide
+	 * while a workspace holds one project per SDK, so a 13.x project refreshing it must leave a
+	 * 12.x project beside it able to see that 12.0.8 is published even though only 12.0.2 is on
+	 * disk. Selecting from a real registry answer is as sound as selecting from a live one,
+	 * crossing a major included — the only thing given up is a release published inside the window.
 	 *
 	 * @param sdkVersion - The tiapp's sdk-version
 	 * @returns {Promise<OriginatedSelection>} The selection and where it came from
 	 * @memberof AcquiredTypes
 	 */
 	private async select (sdkVersion: string): Promise<OriginatedSelection> {
-		const checked = await this.acquirer.checked();
-		if (checked !== undefined && isRecent(checked)) {
-			const cached = selectTypesVersion(sdkVersion, await this.acquirer.cached());
-			if (cached.kind === 'matched') {
-				return { selection: cached, origin: 'cache', checked };
-			}
+		const recorded = await this.acquirer.listing();
+		if (recorded?.versions.length && isRecent(recorded.at)) {
+			return { selection: selectTypesVersion(sdkVersion, recorded.versions), origin: 'cache', checked: recorded.at };
 		}
 
 		// the registry's list when it can be had, so a newer release is picked up as soon as it is
@@ -318,8 +318,6 @@ function report (found: OriginatedSelection): TypesReport {
 	const { sdkVersion, version } = selection;
 
 	if (selection.kind === 'older-major') {
-		// only ever reached for a registry or an offline origin: a cached older major is never
-		// taken without asking the registry first
 		return {
 			level: 'warning',
 			// offline, a missing major means only that none was cached, and whether one is

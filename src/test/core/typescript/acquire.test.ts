@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { NpmAcquirer, typesCacheRoot } from '../../../core/typescript/acquire.ts';
+import { LISTING_FILE, NpmAcquirer, typesCacheRoot } from '../../../core/typescript/acquire.ts';
 import type { CommandResult, CommandRunner } from '../../../core/command.ts';
 
 /** Every npm invocation a test made, so the arguments can be asserted rather than the effect */
@@ -115,33 +115,34 @@ describe('Acquiring @types/titanium', () => {
 		});
 	});
 
-	describe('when the registry was last asked', () => {
-		it('should answer nothing on a machine that has never asked', async () => {
-			const root = await cacheRoot();
-
-			assert.equal(await new NpmAcquirer({ cacheRoot: root }).checked(), undefined);
+	describe('the registry\'s last answer', () => {
+		it('should answer nothing on a machine the registry has never answered for', async () => {
+			assert.equal(await new NpmAcquirer({ cacheRoot: await cacheRoot() }).listing(), undefined);
 		});
 
 		it('should answer nothing when there is no cache directory at all', async () => {
 			const root = path.join(await cacheRoot(), 'never-created');
 
-			assert.equal(await new NpmAcquirer({ cacheRoot: root }).checked(), undefined);
+			assert.equal(await new NpmAcquirer({ cacheRoot: root }).listing(), undefined);
 		});
 
-		it('should record the check when npm answered', async () => {
+		it('should record what the registry said, and when', async () => {
+			// the versions and not just the time: a 13.x project refreshing the record must leave
+			// a 12.x project beside it able to see which 12.x is published, rather than falling
+			// back on whichever it happens to have on disk
 			const root = await cacheRoot();
-			const { run } = fakeRunner([ ok('["13.3.0"]') ]);
+			const { run } = fakeRunner([ ok('["9.2.2","12.0.8","13.3.0"]') ]);
 			const acquirer = new NpmAcquirer({ run, cacheRoot: root });
 
 			const before = Date.now();
 			await acquirer.versions();
-			const checked = await acquirer.checked();
+			const listing = await acquirer.listing();
 
-			assert.ok(checked !== undefined, 'expected the check to have been recorded');
-			assert.ok(checked >= before - 1000 && checked <= Date.now() + 1000, `${checked} is not around now`);
+			assert.deepEqual(listing?.versions, [ '9.2.2', '12.0.8', '13.3.0' ]);
+			assert.ok((listing?.at ?? 0) >= before - 1000 && (listing?.at ?? 0) <= Date.now() + 1000, `${listing?.at} is not around now`);
 		});
 
-		it('should create the cache directory to record the check in', async () => {
+		it('should create the cache directory to record it in', async () => {
 			// the first ever run asks the registry before anything has been installed, so there is
 			// no directory yet
 			const root = path.join(await cacheRoot(), 'not-yet');
@@ -150,10 +151,20 @@ describe('Acquiring @types/titanium', () => {
 
 			await acquirer.versions();
 
-			assert.notEqual(await acquirer.checked(), undefined);
+			assert.deepEqual((await acquirer.listing())?.versions, [ '13.3.0' ]);
 		});
 
-		it('should not record a check the registry could not answer', async () => {
+		it('should record a single version, which npm reports unwrapped', async () => {
+			const root = await cacheRoot();
+			const { run } = fakeRunner([ ok('"13.3.0"') ]);
+			const acquirer = new NpmAcquirer({ run, cacheRoot: root });
+
+			await acquirer.versions();
+
+			assert.deepEqual((await acquirer.listing())?.versions, [ '13.3.0' ]);
+		});
+
+		it('should record nothing the registry could not answer', async () => {
 			// a failed check establishes nothing about what is published, so letting it stand in
 			// for a real one would pin the machine to its cache on the strength of a failure
 			const root = await cacheRoot();
@@ -162,30 +173,43 @@ describe('Acquiring @types/titanium', () => {
 
 			await acquirer.versions();
 
-			assert.equal(await acquirer.checked(), undefined);
+			assert.equal(await acquirer.listing(), undefined);
 		});
 
-		it('should not record a check npm could not even be spawned for', async () => {
-			const root = await cacheRoot();
+		it('should record nothing when npm could not even be spawned', async () => {
 			const acquirer = new NpmAcquirer({
 				run: async () => {
 					throw new Error('spawn npm ENOENT');
 				},
-				cacheRoot: root
+				cacheRoot: await cacheRoot()
 			});
 
 			await acquirer.versions();
 
-			assert.equal(await acquirer.checked(), undefined);
+			assert.equal(await acquirer.listing(), undefined);
 		});
 
-		it('should answer nothing when the record is not a timestamp', async () => {
-			// a hand-edited or truncated file reads as never having asked, which costs one npm run
-			// rather than an answer nobody can account for
+		it('should answer nothing when the record is not readable as one', async () => {
+			// a hand-edited or truncated file reads as no answer, which costs one npm run rather
+			// than an answer nobody can account for
 			const root = await cacheRoot();
-			await fs.writeFile(path.join(root, '.last-registry-check'), 'whenever');
+			await fs.writeFile(path.join(root, LISTING_FILE), 'whenever');
 
-			assert.equal(await new NpmAcquirer({ cacheRoot: root }).checked(), undefined);
+			assert.equal(await new NpmAcquirer({ cacheRoot: root }).listing(), undefined);
+		});
+
+		it('should answer nothing when the record is JSON of the wrong shape', async () => {
+			const root = await cacheRoot();
+			await fs.writeFile(path.join(root, LISTING_FILE), JSON.stringify({ at: 'yesterday', versions: '13.3.0' }));
+
+			assert.equal(await new NpmAcquirer({ cacheRoot: root }).listing(), undefined);
+		});
+
+		it('should leave out anything in the record that is not a version string', async () => {
+			const root = await cacheRoot();
+			await fs.writeFile(path.join(root, LISTING_FILE), JSON.stringify({ at: Date.now(), versions: [ '13.3.0', 7, null, '9.2.2' ] }));
+
+			assert.deepEqual((await new NpmAcquirer({ cacheRoot: root }).listing())?.versions, [ '13.3.0', '9.2.2' ]);
 		});
 
 		it('should not let the record be read as a cached version', async () => {
@@ -213,7 +237,7 @@ describe('Acquiring @types/titanium', () => {
 			const acquirer = new NpmAcquirer({ run, cacheRoot: path.join(blocked, 'types') });
 
 			assert.deepEqual(await acquirer.versions(), [ '13.3.0' ], 'the versions still answer');
-			assert.equal(await acquirer.checked(), undefined, 'nothing was recorded, so the registry is asked again');
+			assert.equal(await acquirer.listing(), undefined, 'nothing was recorded, so the registry is asked again');
 		});
 	});
 
