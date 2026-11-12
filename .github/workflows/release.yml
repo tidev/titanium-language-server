@@ -1,0 +1,62 @@
+name: Release
+on:
+  push:
+    branches: [ main ]
+
+permissions: {}
+
+# a release pull request is amended in place as commits land, so two runs must not race for it
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: Release pull request
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      # keeps a pull request open that bumps the version and writes CHANGELOG.md from the commit
+      # subjects since the last tag. Merging it tags v<version> and publishes the GitHub release,
+      # which is what the publish job below waits for
+      - id: release
+        uses: googleapis/release-please-action@v5
+
+  publish:
+    name: Publish to npm
+    needs: release-please
+    # a release created with GITHUB_TOKEN does not fire `release: published`, so nothing would
+    # start a workflow of its own: the publish hangs off release-please's own output instead
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write # npm trusted publishing
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+          registry-url: 'https://registry.npmjs.org'
+      # trusted publishing needs npm 11.5.1 or newer, whatever the runner's Node bundles
+      - run: npm install --global npm@^11.5.1
+      - run: npm ci
+
+      # a pull request opened by GITHUB_TOKEN does not start workflows, so the release pull
+      # request itself gets no CI run: lint and the suite run here, before anything is published
+      - name: Lint
+        run: npm run lint
+      - name: Test
+        run: npm test
+
+      - name: Publish
+        run: npm publish

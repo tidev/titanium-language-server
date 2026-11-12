@@ -167,15 +167,57 @@ working, unchecked by tsc and ESLint, and it broke twice while it existed.
 ## Releasing
 
 Published to npm as `@titanium-sdk/language-server`; the command it installs is still
-`titanium-language-server`. A release is a pull request that bumps `version` and renames
-`CHANGELOG.md`'s `## Unreleased` heading to `## <version> - <date>`, with a new, empty
-`## Unreleased` above it. Then a GitHub Release tagged `v<version>` from the merge, with that
-section as its notes: `publish.yml` checks the tag matches and the changelog has the version's
-heading, runs lint and tests, and publishes through npm's trusted publishing, with provenance and
-no stored token.
+`titanium-language-server`. **Releases are release-please's job, not a hand-written pull request.**
+`release.yml` runs `googleapis/release-please-action` on every push to `main`, and it keeps a
+release pull request open that bumps `version` in `package.json` and `package-lock.json` and writes
+the new `CHANGELOG.md` section from the commits since the last tag. Releasing is merging that pull
+request. release-please then tags `v<version>` and publishes the GitHub release, and the publish job
+in the same workflow runs lint and the suite and publishes through npm's trusted publishing, with
+provenance and no stored token.
 
-The changelog is kept up as changes land, so a release never has to dig through history for it —
-see below.
+Two things follow from that.
+
+- **The release is only as good as the commit subjects.** release-please reads them, not the diff,
+  so a subject is what a user will read in the changelog and in the release notes. Pull requests are
+  squash-merged, so the subject that lands is the pull request's title.
+- **`.release-please-manifest.json` is the source of truth for the current version**, and
+  release-please owns it along with `version` in `package.json`. Do not bump either by hand; the
+  only reason to touch the manifest is to recover from a release that went wrong.
+
+`release-please-config.json` sets `bump-minor-pre-major`, so while the package is below 1.0 a
+breaking change bumps the minor rather than jumping to 1.0.0. Going to 1.0.0 is a deliberate act:
+drop that setting, or land a commit with `Release-As: 1.0.0` in its body.
+
+The publish job runs in the `release` environment, and npm's trusted publisher for the package has
+to name this repository, the workflow `release.yml` and that environment. The workflow's filename is
+part of what npm checks, so renaming it means changing that setting too.
+
+### Steering what comes out
+
+The commit is the input, but release-please takes four kinds of instruction in it.
+
+- `feat:` is a minor bump, `fix:` and `perf:` are patches, and `feat!:` — or a `BREAKING CHANGE:`
+  footer — is breaking. `docs`, `test`, `ci`, `build`, `chore`, `refactor` and `style` are released
+  as nothing and stay out of the changelog, which is the same line the old hand-written changelog
+  drew.
+- **Several entries from one commit.** Put more conventional-commit lines at the *bottom* of the
+  commit body and each becomes its own changelog entry — the way to give a squashed pull request
+  that did two user-visible things two lines.
+- **Fixing an entry after the merge.** release-please re-reads the merged pull request's body, so
+  editing it to add a block fixes what the changelog will say, without rewriting history:
+
+  ```
+  BEGIN_COMMIT_OVERRIDE
+  feat(tss): offer colour names where a colour is expected
+
+  fix(view): stop warning about an attribute a custom tag does have
+  END_COMMIT_OVERRIDE
+  ```
+
+  This only works because the merge was a squash — with a plain merge release-please cannot tell
+  which commit the override belongs to.
+- **Choosing the version.** `Release-As: 0.4.0` in a commit body makes the next release pull request
+  that version, whatever the commits since the last tag would have picked.
 
 ## Testing
 
@@ -356,16 +398,19 @@ one case.
 ## Commits and pull requests
 
 Conventional Commits, for example `feat(tss): …`, `fix(view): …`, `test: …`. Issue references go in
-the commit body rather than the subject.
+the commit body rather than the subject. **The subject is read by release-please**: a `feat`, `fix`
+or `perf` subject is published as a changelog line and as release notes, so write it for someone
+using the server rather than someone reading the diff. Pull requests are squash-merged, so it is the
+pull request's title that lands — and a `feat!:` subject, or a `BREAKING CHANGE:` footer, moves the
+version. See [Releasing](#releasing) for the rest of what a commit can tell release-please.
 
 Every pull request body **closes its issues with GitHub's keyword syntax** — `Closes #9`, one per
 issue — so merging shuts them automatically. `Refs #9` only links, and leaves someone to close it by
 hand later; use it only for an issue the pull request genuinely does not finish.
 
-A pull request that changes something a user would notice — a `feat`, a `fix`, a `perf`, a change
-to what the package needs to run — **adds a line under `## Unreleased` in `CHANGELOG.md`**, under
-the subheading for the area it touches, ending with its own number: `(#70)`. Write it for someone
-using the server, not someone reading the code. Tests, CI, refactors and docs need no line.
+**Do not edit `CHANGELOG.md`.** release-please writes it from the commits in the release pull
+request; a line added by hand is a conflict waiting for that pull request. A change a user would
+notice earns its changelog line by having a `feat`, `fix` or `perf` subject worth reading.
 
 Work on a branch and open a pull request. Nothing is pushed to `main` directly. Where several
 changes are in flight, stack the branches.
