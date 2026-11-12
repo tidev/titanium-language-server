@@ -1,12 +1,11 @@
 # Changelog
 
-What changed in each release of `@titanium-sdk/language-server`, newest first. The numbers are the
-pull requests that made each change.
+What changed in each release of `@titanium-sdk/language-server`, newest first.
 
-A pull request that changes something a user would notice adds a line under Unreleased. A release
-renames that heading to its version and date, and starts a new, empty one above it.
-
-## Unreleased
+From 0.2.0 on, release-please writes this file from the `feat`, `fix` and `perf` commits that have
+landed on `main` since the last tag, so nothing here is written by hand. The 0.1.x sections below
+came before that and were written by hand; their numbers are the pull requests that made each
+change.
 
 ## 0.1.1 - 2026-10-31
 
