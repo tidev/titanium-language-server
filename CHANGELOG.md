@@ -8,6 +8,11 @@ renames that heading to its version and date, and starts a new, empty one above 
 
 ## Unreleased
 
+### Projects
+
+- Show the warning about `@types/titanium` being older than the SDK once per SDK version, rather
+  than each time a project is opened again (#PR)
+
 ## 0.1.1 - 2026-10-31
 
 ### Controllers and JavaScript

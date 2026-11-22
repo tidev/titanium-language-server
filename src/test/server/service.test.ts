@@ -451,6 +451,38 @@ describe('The language service adapter', () => {
 				assert.ok(project && service.services.get(project), 'expected the new project to have a service');
 			});
 
+			it('should show the warning about older types once, however often the project is opened again', async () => {
+				// a project is replaced whenever its tiapp.xml moves, and a build or a save moves it; each
+				// replacement resolves the types again and used to interrupt the user with the same sentence
+				const older: TypesSource = {
+					name: 'an older major',
+					locate: async project => {
+						const resolved = await lentTypes.locate(project);
+						return resolved && { ...resolved, report: { level: 'warning', message: `No types for ${project.sdkVersion()}` } };
+					}
+				};
+				logger.detach();
+				connection = new FakeConnection();
+				service = new TiLanguageService(connection.asConnection(), [ older ]);
+				service.listen();
+				const copy = await copyProject();
+				await fs.cp(copy, path.join(workspace, 'app-two'), { recursive: true });
+				await connection.initialize({ rootUri: URI.file(workspace).toString() });
+
+				await editTiapp(copy, text => text.replace('</ti:app>', '<!-- touched -->\n</ti:app>'));
+				await ask(copy);
+
+				// two projects on one SDK and one of them opened twice: said once, logged every time
+				assert.deepEqual(connection.warnings, [ 'No types for 10.1.0.GA' ]);
+				assert.equal(connection.logs.filter(message => message === 'No types for 10.1.0.GA').length, 3);
+
+				// a different SDK is a different thing to be told
+				await editTiapp(copy, text => text.replace(/<sdk-version>[^<]*<\/sdk-version>/, '<sdk-version>99.0.0.GA</sdk-version>'));
+				await ask(copy);
+
+				assert.deepEqual(connection.warnings, [ 'No types for 10.1.0.GA', 'No types for 99.0.0.GA' ]);
+			});
+
 			it('should rebuild the service of a project whose sdk-version changed', async () => {
 				const copy = await copyProject();
 				await connection.initialize({ rootUri: URI.file(workspace).toString() });
