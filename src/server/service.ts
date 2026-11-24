@@ -89,6 +89,8 @@ export class TiLanguageService {
 	private diagnosed = new Set<string>();
 	/** The projects already told their types are too old to warn from, so it is said once */
 	private explained = new Set<string>();
+	/** The warnings already shown, so a project opened again does not interrupt with the same one */
+	private warned = new Set<string>();
 
 	/**
 	 * @param connection - The connection to serve on
@@ -259,8 +261,12 @@ export class TiLanguageService {
 			}
 
 			// info is logged and a warning is shown: the types trail the SDK on nearly every
-			// project, so reporting that as an interruption would train the user to ignore it
-			if (opened.report.level === 'warning') {
+			// project, so reporting that as an interruption would train the user to ignore it.
+			// Shown once per message for the life of the server: a project is opened again whenever
+			// its tiapp.xml moves, and a workspace can hold several on one SDK, and the sentence
+			// says nothing the second time. It names the SDK, so another SDK is still told
+			if (opened.report.level === 'warning' && !this.warned.has(opened.report.message)) {
+				this.warned.add(opened.report.message);
 				this.connection.window.showWarningMessage(opened.report.message);
 			}
 			logger.log(opened.report.message);
